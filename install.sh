@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# =============================================================================
-# NexusNet Bot Manager — Bootstrap
-# Only installs the manager command. Does NOT install the bot.
-#
-#   bash <(curl -fsSL https://raw.githubusercontent.com/SiNaKeEn/NexusNet-Bot/Manager/install.sh)
-# =============================================================================
+# NexusNet Bot Manager — Bootstrap (does NOT install the bot)
+# bash <(curl -fsSL https://raw.githubusercontent.com/SiNaKeEn/NexusNet-Bot/Manager/install.sh)
 set -euo pipefail
 
 REPO="SiNaKeEn/NexusNet-Bot"
@@ -25,25 +21,14 @@ trap 'rm -f "$TMP"' EXIT
 
 if ! curl -fsSL -o "${TMP}" \
   "https://raw.githubusercontent.com/${REPO}/${MANAGER_BRANCH}/nexus.sh"; then
-  echo -e "${RED}[-] Failed to download manager from GitHub.${NC}"
+  echo -e "${RED}[-] Failed to download from GitHub.${NC}"
   exit 1
 fi
 
 cp "${TMP}" "${MANAGER_PATH}"
 chmod +x "${MANAGER_PATH}"
 
-echo -e "${GREEN}[+] Manager installed -> ${MANAGER_PATH}${NC}"
+echo -e "${GREEN}[+] Installed -> ${MANAGER_PATH}${NC}"
 echo
-echo "Run:"
 echo "  sudo nexusnetmanager"
-echo
-echo "Menu:"
-echo "  1) Install Bot          <- place ZIP in /root first"
-echo "  2) Update Manager"
-echo "  3) Update Bot (local ZIP)"
-echo "  4) Backup"
-echo "  5) Restore"
-echo "  6) Service Management"
-echo "  7) Diagnostics"
-echo "  8) Uninstall"
 echo
