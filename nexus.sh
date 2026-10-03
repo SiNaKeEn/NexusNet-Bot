@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
 # NexusNet Manager  —  Advanced Control Script
-# Supports: Install | Update (with rollback) | Backup | Restore | Migrate |
-#           Repair | Diagnostics | Service | Config | Version Manager
+# Command: nexusnetmanager
+# Supports: Update | Backup | Restore | Migrate | DB Migrate (SQLite→Postgres) |
+#           Repair | Diagnostics | Service | Version Manager | Uninstall
 # =============================================================================
 # Usage:
-#   bash nexus.sh                  → Interactive Menu
-#   sudo bash nexus.sh <command>   → Command Mode
+#   nexusnetmanager                  → Interactive Menu
+#   sudo nexusnetmanager <command>   → Command Mode
 # =============================================================================
 set -euo pipefail
 
@@ -21,6 +22,7 @@ REPO="SiNaKeEn/NexusNet-Bot"
 MANAGER_BRANCH="Manager"
 ASSUME_YES="${ASSUME_YES:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+CMD_NAME="nexusnetmanager"
 
 # Colors
 RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[0;33m'
@@ -36,7 +38,7 @@ info() { echo -e "${CYN}ℹ${NC}  $*"; }
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    die "این دستور را با root اجرا کن: sudo bash $0 $*"
+    die "این دستور را با root اجرا کن: sudo ${CMD_NAME} $*"
   fi
 }
 
@@ -132,6 +134,30 @@ get_installed_version() {
   fi
 }
 
+find_sqlite_db() {
+  # Common locations
+  local candidates=(
+    "${INSTALL_DIR}/storage/nexusnet.db"
+    "${INSTALL_DIR}/storage/database.db"
+    "${INSTALL_DIR}/data/nexusnet.db"
+    "${INSTALL_DIR}/nexusnet.db"
+  )
+  for f in "${candidates[@]}"; do
+    if [[ -f "$f" ]]; then
+      echo "$f"
+      return 0
+    fi
+  done
+  # Fallback: search
+  local found
+  found=$(find "${INSTALL_DIR}" -name "*.db" -type f 2>/dev/null | head -1)
+  if [[ -n "$found" ]]; then
+    echo "$found"
+    return 0
+  fi
+  return 1
+}
+
 # ======================== GitHub / Version Helpers ========================
 github_api() {
   local endpoint="$1"
@@ -151,7 +177,6 @@ download_release() {
   local tag="$1"
   local dest="$2"
   local asset_url
-  # Try to find a zip asset, fallback to source zip
   asset_url=$(github_api "releases/tags/${tag}" | grep -oP '"browser_download_url":\s*"\K[^"]+\.zip' | head -1)
   if [[ -z "${asset_url}" ]]; then
     asset_url="https://github.com/${REPO}/archive/refs/tags/${tag}.zip"
@@ -161,26 +186,6 @@ download_release() {
     die "Download failed: ${asset_url}"
   fi
   ok "Downloaded → ${dest}"
-}
-
-verify_checksum() {
-  local file="$1"
-  local expected="$2"
-  if [[ -z "${expected}" ]]; then
-    warn "No checksum provided — skipping verification"
-    return 0
-  fi
-  local actual
-  actual=$(sha256sum "${file}" | awk '{print $1}')
-  if [[ "${actual}" == "${expected}" ]]; then
-    ok "Checksum verified"
-    return 0
-  else
-    err "Checksum mismatch!"
-    echo "  Expected: ${expected}"
-    echo "  Got:      ${actual}"
-    return 1
-  fi
 }
 
 # ======================== Disk / Health ========================
@@ -228,6 +233,8 @@ create_manifest() {
   local mode="$2"
   local version
   version="$(get_installed_version)"
+  local db_path=""
+  db_path="$(find_sqlite_db 2>/dev/null || true)"
   cat > "${dest}/manifest.json" <<EOF
 {
   "timestamp": "$(stamp)",
@@ -236,14 +243,16 @@ create_manifest() {
   "install_dir": "${INSTALL_DIR}",
   "version": "${version}",
   "mode": "${mode}",
-  "service": "${SERVICE_NAME}"
+  "service": "${SERVICE_NAME}",
+  "sqlite_db": "${db_path}"
 }
 EOF
 }
 
 do_backup() {
   need_root
-  [[ -d "${INSTALL_DIR}" ]] || die "Install dir not found: ${INSTALL_DIR}"
+  [[ -d "${INSTALL_DIR}" ]] || die "Install dir not found: ${INSTALL_DIR}
+ابتدا بات را نصب کنید یا INSTALL_DIR را درست تنظیم کنید."
 
   local mode="${1:-full}"
   local ts; ts="$(stamp)"
@@ -252,7 +261,6 @@ do_backup() {
 
   log "Creating backup → ${dest} (mode=${mode})"
 
-  # Always backup .env
   if [[ -f "${INSTALL_DIR}/.env" ]]; then
     cp -a "${INSTALL_DIR}/.env" "${dest}/.env"
   else
@@ -268,13 +276,18 @@ do_backup() {
       ;;
     db|database)
       mkdir -p "${dest}/database"
-      if [[ -d "${INSTALL_DIR}/storage" ]]; then
-        find "${INSTALL_DIR}/storage" -maxdepth 2 \( -name '*.db' -o -name '*.db-*' -o -name '*.sqlite' \) \
-          -exec cp -a {} "${dest}/database/" \; 2>/dev/null || true
-        # fallback full storage if needed
-        if [[ ! "$(ls -A "${dest}/database" 2>/dev/null)" ]]; then
-          cp -a "${INSTALL_DIR}/storage" "${dest}/storage"
-        fi
+      local db
+      db="$(find_sqlite_db 2>/dev/null || true)"
+      if [[ -n "$db" ]]; then
+        cp -a "$db" "${dest}/database/"
+        # also wal/shm if exist
+        [[ -f "${db}-wal" ]] && cp -a "${db}-wal" "${dest}/database/" 2>/dev/null || true
+        [[ -f "${db}-shm" ]] && cp -a "${db}-shm" "${dest}/database/" 2>/dev/null || true
+        ok "SQLite DB: $db"
+      else
+        # fallback: copy whole storage
+        [[ -d "${INSTALL_DIR}/storage" ]] && cp -a "${INSTALL_DIR}/storage" "${dest}/storage"
+        warn "Could not locate exact .db file, copied storage/"
       fi
       ;;
     config)
@@ -291,14 +304,12 @@ do_backup() {
 
   create_manifest "${dest}" "${mode}"
 
-  # Create tarball
   mkdir -p "${BACKUP_ROOT}"
   local tar_path="${BACKUP_ROOT}/nexusnet-backup-${ts}.tar.gz"
   tar -czf "${tar_path}" -C "${BACKUP_ROOT}" "${ts}"
   ok "Folder : ${dest}"
   ok "Archive: ${tar_path}"
 
-  # Prune old archives
   local n
   n="$(ls -1t "${BACKUP_ROOT}"/nexusnet-backup-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
   if [[ "${n}" -gt "${KEEP_BACKUPS}" ]]; then
@@ -318,7 +329,6 @@ do_restore() {
   need_root
   local src="${1:-}"
 
-  # Interactive selection if no arg
   if [[ -z "${src}" ]]; then
     echo
     echo -e "${BLD}Available Backups:${NC}"
@@ -362,7 +372,6 @@ do_restore() {
   [[ -f "${work}/manifest.json" ]] && cat "${work}/manifest.json"
   echo
 
-  # What to restore
   local restore_mode="everything"
   if [[ "${ASSUME_YES}" != "1" ]]; then
     echo "What do you want to restore?"
@@ -381,7 +390,6 @@ do_restore() {
 
   confirm "⚠ این عملیات روی ${INSTALL_DIR} اعمال می‌شود. سرویس متوقف خواهد شد." || die "Cancelled"
 
-  # Safety backup
   log "Creating safety backup of current state..."
   ASSUME_YES=1 do_backup full >/dev/null || true
 
@@ -480,16 +488,13 @@ do_update() {
 
   confirm "آپدیت به ${target_version} انجام شود؟" || die "Cancelled"
 
-  # 1. Backup
   log "Creating pre-update backup..."
   local backup_path
   backup_path="$(ASSUME_YES=1 do_backup full)"
   ok "Backup: ${backup_path}"
 
-  # 2. Check disk
   check_disk_space 400 || die "Not enough disk space"
 
-  # 3. Download or use local zip
   local zip_path=""
   local tmp_dl=""
   if [[ -f "${target_version}" ]]; then
@@ -501,7 +506,6 @@ do_update() {
     zip_path="${tmp_dl}"
   fi
 
-  # 4. Extract
   local tmp_extract; tmp_extract="$(mktemp -d /tmp/nexusnet_upgrade_XXXXXX)"
   trap 'rm -rf "'"${tmp_extract}"'" "${tmp_dl:-}"' RETURN
 
@@ -512,12 +516,10 @@ do_update() {
   elif [[ -d "${tmp_extract}/nexus_bot" ]]; then
     src="${tmp_extract}/nexus_bot"
   else
-    # GitHub source archive usually has Repo-Tag folder
     src="$(find "${tmp_extract}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
   fi
   [[ -d "${src}" ]] || die "Could not find source folder inside archive"
 
-  # 5. Create rollback point (code snapshot)
   local rollback_dir="${BACKUP_ROOT}/rollback-$(stamp)"
   mkdir -p "${rollback_dir}"
   log "Creating rollback point → ${rollback_dir}"
@@ -526,10 +528,8 @@ do_update() {
     cp -a "${INSTALL_DIR}" "${rollback_dir}/code_full" 2>/dev/null || true
   [[ -f "${INSTALL_DIR}/.env" ]] && cp -a "${INSTALL_DIR}/.env" "${rollback_dir}/.env"
 
-  # 6. Stop service
   service_stop
 
-  # 7. Replace code (preserve critical dirs)
   log "Installing new version..."
   find "${INSTALL_DIR}" -mindepth 1 -maxdepth 1 \
     ! -name '.env' \
@@ -542,16 +542,13 @@ do_update() {
   cp -a "${src}/." "${INSTALL_DIR}/"
   mkdir -p "${INSTALL_DIR}/storage" "${INSTALL_DIR}/backups"
 
-  # Preserve / restore .env if wiped
   if [[ ! -f "${INSTALL_DIR}/.env" && -f "${rollback_dir}/.env" ]]; then
     cp -a "${rollback_dir}/.env" "${INSTALL_DIR}/.env"
     ok "Restored .env from rollback point"
   fi
 
-  # Simple .env merge notice (new keys)
   if [[ -f "${INSTALL_DIR}/.env.example" && -f "${INSTALL_DIR}/.env" ]]; then
     log "Checking for new config keys..."
-    # Just warn about missing keys (don't auto-add)
     while IFS= read -r line; do
       [[ "${line}" =~ ^#.*$ || -z "${line}" ]] && continue
       local key="${line%%=*}"
@@ -562,16 +559,10 @@ do_update() {
   fi
 
   fix_perms
+  run_preflight || warn "Preflight failed"
 
-  # 8. Preflight
-  if ! run_preflight; then
-    warn "Preflight failed"
-  fi
-
-  # 9. Start + Health check
   if service_start && health_check; then
     ok "Update to ${target_version} successful!"
-    # Clean old rollback if everything is fine (keep last 3)
     ls -1dt "${BACKUP_ROOT}"/rollback-*/ 2>/dev/null | tail -n +4 | xargs -r rm -rf
   else
     err "Health check FAILED after update!"
@@ -579,7 +570,7 @@ do_update() {
     if confirm "Rollback to previous version?"; then
       do_rollback "${rollback_dir}"
     else
-      err "Service may be down. Run: $0 doctor"
+      err "Service may be down. Run: ${CMD_NAME} doctor"
       return 1
     fi
   fi
@@ -602,7 +593,6 @@ do_rollback() {
     done < <(ls -1dt "${BACKUP_ROOT}"/rollback-*/ 2>/dev/null)
 
     if [[ ${#points[@]} -eq 0 ]]; then
-      # Fallback to latest full backup
       warn "No rollback points found. Trying latest full backup..."
       local latest
       latest="$(ls -1t "${BACKUP_ROOT}"/nexusnet-backup-*.tar.gz 2>/dev/null | head -1)"
@@ -616,7 +606,6 @@ do_rollback() {
   fi
 
   [[ -d "${rb_dir}" ]] || die "Rollback directory not found"
-
   confirm "Rollback from ${rb_dir}؟" || die "Cancelled"
 
   service_stop
@@ -628,7 +617,6 @@ do_rollback() {
     cp -a "${rb_dir}/code/." "${INSTALL_DIR}/"
     ok "Code restored from rollback point"
   elif [[ -d "${rb_dir}/code_full" ]]; then
-    # more aggressive
     warn "Using full code snapshot"
     rsync -a --delete --exclude='storage' --exclude='data' --exclude='backups' --exclude='.venv' \
       "${rb_dir}/code_full/" "${INSTALL_DIR}/" || true
@@ -642,7 +630,7 @@ do_rollback() {
   ok "Rollback completed"
 }
 
-# ======================== Migrate ========================
+# ======================== VPS Migrate ========================
 do_export_migrate() {
   need_root
   [[ -d "${INSTALL_DIR}" ]] || die "Install dir not found"
@@ -669,21 +657,20 @@ do_export_migrate() {
   local tar_path="${MIGRATE_ROOT}/nexusnet-migrate-${ts}.tar.gz"
   tar -czf "${tar_path}" -C "${MIGRATE_ROOT}" "export-${ts}"
 
-  # Restart if we stopped
   has_service && ! systemctl is-active --quiet "${SERVICE_NAME}" && service_start || true
 
   ok "Migration package ready: ${tar_path}"
   echo
   echo -e "${BLD}روی VPS جدید:${NC}"
   echo "  1) bash <(curl -fsSL https://raw.githubusercontent.com/${REPO}/${MANAGER_BRANCH}/install.sh)"
-  echo "  2) sudo bash nexus.sh import-migrate ${tar_path}"
-  echo "  3) sudo bash nexus.sh doctor"
+  echo "  2) sudo ${CMD_NAME} import-migrate ${tar_path}"
+  echo "  3) sudo ${CMD_NAME} doctor"
 }
 
 do_import_migrate() {
   need_root
   local src="${1:-}"
-  [[ -n "${src}" ]] || die "Usage: $0 import-migrate <migrate.tar.gz|dir>"
+  [[ -n "${src}" ]] || die "Usage: ${CMD_NAME} import-migrate <migrate.tar.gz|dir>"
   [[ -d "${INSTALL_DIR}" ]] || die "Install dir missing — first install the bot"
 
   local work="${src}"
@@ -718,7 +705,7 @@ do_import_migrate() {
   run_preflight || true
   service_start
   [[ -n "${tmp}" ]] && rm -rf "${tmp}"
-  ok "Import migrate done — run: $0 doctor"
+  ok "Import migrate done — run: ${CMD_NAME} doctor"
 }
 
 do_ssh_migrate() {
@@ -769,32 +756,25 @@ do_ssh_migrate() {
 
   confirm "ادامه مهاجرت به ${dest_ip}؟" || die "Cancelled"
 
-  # Create package locally
   log "Creating migration package on source..."
-  local pkg
-  pkg="$(ASSUME_YES=1 do_export_migrate | tail -1)"
-  # Actually capture the tar path properly
-  local ts; ts="$(stamp)"
-  local dest_pkg="${MIGRATE_ROOT}/nexusnet-migrate-${ts}.tar.gz"
-  # Re-run export more carefully
   ASSUME_YES=1 do_export_migrate >/dev/null
+  local pkg
   pkg="$(ls -1t "${MIGRATE_ROOT}"/nexusnet-migrate-*.tar.gz | head -1)"
 
-  log "Transferring package (${pkg})..."
+  log "Transferring package..."
   "${scp_cmd[@]}" "${pkg}" "${dest_user}@${dest_ip}:/tmp/nexusnet-migrate.tar.gz"
 
   log "Running import on destination..."
-  "${ssh_cmd[@]}" "bash -s" <<'REMOTE'
+  "${ssh_cmd[@]}" "bash -s" <<REMOTE
 set -e
-if [[ ! -d /opt/nexusnet ]]; then
+if [[ ! -d ${INSTALL_DIR} ]]; then
   echo "NexusNet not installed on destination. Please install first."
   exit 1
 fi
-# Assuming nexus.sh is available
-if [[ -f /opt/nexusnet/nexus.sh ]]; then
-  sudo bash /opt/nexusnet/nexus.sh import-migrate /tmp/nexusnet-migrate.tar.gz
-elif [[ -f /usr/local/bin/nexus ]]; then
-  sudo nexus import-migrate /tmp/nexusnet-migrate.tar.gz
+if command -v ${CMD_NAME} >/dev/null 2>&1; then
+  sudo ${CMD_NAME} import-migrate /tmp/nexusnet-migrate.tar.gz
+elif [[ -f ${INSTALL_DIR}/nexus.sh ]]; then
+  sudo bash ${INSTALL_DIR}/nexus.sh import-migrate /tmp/nexusnet-migrate.tar.gz
 else
   echo "Manager script not found on destination"
   exit 1
@@ -805,6 +785,250 @@ REMOTE
   echo
   info "Source VPS remains untouched."
   info "After verifying the new VPS, update your DNS / reverse proxy."
+}
+
+# ======================== DB Migrate: SQLite → PostgreSQL ========================
+do_db_migrate_to_postgres() {
+  need_root
+  [[ -d "${INSTALL_DIR}" ]] || die "Install dir not found: ${INSTALL_DIR}"
+
+  echo
+  echo -e "${BLD}══ SQLite → PostgreSQL Migration ══${NC}"
+  echo
+  info "این ابزار داده‌های فعلی SQLite را به PostgreSQL منتقل می‌کند."
+  info "بات از نسخه 1.3.1 از PostgreSQL پشتیبانی می‌کند."
+  echo
+
+  # 1. Find SQLite DB
+  local sqlite_db
+  sqlite_db="$(find_sqlite_db 2>/dev/null || true)"
+  if [[ -z "${sqlite_db}" ]]; then
+    echo "فایل SQLite پیدا نشد. مسیر دقیق را وارد کنید:"
+    read -r -p "Path to .db file: " sqlite_db
+    [[ -f "${sqlite_db}" ]] || die "File not found: ${sqlite_db}"
+  else
+    ok "SQLite DB found: ${sqlite_db}"
+    local sz; sz=$(du -h "${sqlite_db}" | awk '{print $1}')
+    echo "  Size: ${sz}"
+  fi
+
+  # Show tables
+  if has_cmd sqlite3; then
+    echo
+    log "Tables in SQLite:"
+    sqlite3 "${sqlite_db}" ".tables" 2>/dev/null || true
+    echo
+    local user_count
+    user_count=$(sqlite3 "${sqlite_db}" "SELECT count(*) FROM users;" 2>/dev/null || echo "?")
+    echo "  users count: ${user_count}"
+  fi
+
+  # 2. Get PostgreSQL connection info
+  echo
+  echo -e "${BLD}PostgreSQL Connection:${NC}"
+  echo "مثال DATABASE_URL:"
+  echo "  postgresql+asyncpg://user:password@localhost:5432/nexusnet"
+  echo "  یا: postgresql://user:password@host:5432/dbname"
+  echo
+  read -r -p "PostgreSQL DATABASE_URL: " pg_url
+  [[ -n "${pg_url}" ]] || die "DATABASE_URL required"
+
+  # Normalize for async if needed (bot uses aiosqlite / asyncpg)
+  local pg_url_sync="${pg_url}"
+  # For migration script we need sync driver
+  pg_url_sync="${pg_url_sync//postgresql+asyncpg/postgresql}"
+  pg_url_sync="${pg_url_sync//postgres+asyncpg/postgresql}"
+
+  # 3. Confirm
+  echo
+  warn "این عملیات:"
+  echo "  1. از SQLite فعلی بکاپ می‌گیرد"
+  echo "  2. سرویس را متوقف می‌کند"
+  echo "  3. داده‌ها را به PostgreSQL کپی می‌کند"
+  echo "  4. فایل .env را آپدیت می‌کند (DATABASE_URL)"
+  echo "  5. سرویس را دوباره استارت می‌کند"
+  echo
+  confirm "ادامه؟" || die "Cancelled"
+
+  # 4. Safety backup
+  log "Creating safety backup..."
+  ASSUME_YES=1 do_backup full >/dev/null || true
+  ok "Backup done"
+
+  # 5. Stop service
+  service_stop
+
+  # 6. Run Python migration script
+  local py="${INSTALL_DIR}/.venv/bin/python"
+  if [[ ! -x "${py}" ]]; then
+    py="$(command -v python3)"
+  fi
+  [[ -x "${py}" ]] || die "Python not found"
+
+  # Install required packages if missing
+  log "Checking Python packages (sqlalchemy, psycopg2/asyncpg)..."
+  "${py}" -c "import sqlalchemy" 2>/dev/null || {
+    log "Installing sqlalchemy..."
+    "${py}" -m pip install sqlalchemy -q
+  }
+  "${py}" -c "import psycopg2" 2>/dev/null || {
+    log "Installing psycopg2-binary..."
+    "${py}" -m pip install psycopg2-binary -q || "${py}" -m pip install psycopg2 -q || true
+  }
+
+  local migrate_script
+  migrate_script="$(mktemp /tmp/nexus_db_migrate_XXXXXX.py)"
+
+  cat > "${migrate_script}" << 'PYEOF'
+#!/usr/bin/env python3
+"""SQLite → PostgreSQL data migrator for NexusNet"""
+import sys
+import sqlite3
+from urllib.parse import urlparse
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: migrate.py <sqlite_path> <postgres_url>")
+        sys.exit(1)
+
+    sqlite_path = sys.argv[1]
+    pg_url = sys.argv[2]
+
+    # Normalize URL for psycopg2
+    if pg_url.startswith("postgresql+asyncpg://"):
+        pg_url = pg_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    if pg_url.startswith("postgres://"):
+        pg_url = pg_url.replace("postgres://", "postgresql://", 1)
+
+    print(f"Source SQLite : {sqlite_path}")
+    print(f"Target Postgres: {pg_url.split('@')[-1] if '@' in pg_url else pg_url}")
+
+    try:
+        from sqlalchemy import create_engine, text, inspect, MetaData
+        from sqlalchemy.schema import CreateTable
+    except ImportError:
+        print("ERROR: sqlalchemy not installed")
+        sys.exit(1)
+
+    # Connect
+    sqlite_engine = create_engine(f"sqlite:///{sqlite_path}")
+    try:
+        pg_engine = create_engine(pg_url)
+        with pg_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        print("✓ PostgreSQL connection OK")
+    except Exception as e:
+        print(f"ERROR: Cannot connect to PostgreSQL: {e}")
+        sys.exit(1)
+
+    sqlite_meta = MetaData()
+    sqlite_meta.reflect(bind=sqlite_engine)
+
+    tables = list(sqlite_meta.tables.keys())
+    print(f"\nFound {len(tables)} tables: {', '.join(tables)}")
+
+    # Create tables in Postgres (simple approach)
+    pg_meta = MetaData()
+    for table_name, table in sqlite_meta.tables.items():
+        # Re-bind table to pg metadata with adjusted types if needed
+        table.to_metadata(pg_meta)
+
+    print("\nCreating schema in PostgreSQL...")
+    try:
+        pg_meta.create_all(pg_engine)
+        print("✓ Schema created")
+    except Exception as e:
+        print(f"WARNING: Schema creation issue (tables may already exist): {e}")
+
+    # Copy data
+    print("\nCopying data...")
+    total_rows = 0
+    with sqlite_engine.connect() as sconn, pg_engine.connect() as pconn:
+        for table_name in tables:
+            try:
+                rows = sconn.execute(text(f'SELECT * FROM "{table_name}"')).fetchall()
+                if not rows:
+                    print(f"  {table_name}: 0 rows (skip)")
+                    continue
+
+                cols = rows[0]._mapping.keys()
+                col_list = ", ".join([f'"{c}"' for c in cols])
+                placeholders = ", ".join([f":{c}" for c in cols])
+
+                # Clear existing data in target (optional - be careful)
+                # pconn.execute(text(f'DELETE FROM "{table_name}"'))
+
+                inserted = 0
+                for row in rows:
+                    data = dict(row._mapping)
+                    try:
+                        pconn.execute(
+                            text(f'INSERT INTO "{table_name}" ({col_list}) VALUES ({placeholders})'),
+                            data
+                        )
+                        inserted += 1
+                    except Exception as e:
+                        # Try without conflict handling
+                        print(f"    row error in {table_name}: {e}")
+                pconn.commit()
+                print(f"  {table_name}: {inserted}/{len(rows)} rows")
+                total_rows += inserted
+            except Exception as e:
+                print(f"  ERROR on table {table_name}: {e}")
+
+    print(f"\n✓ Migration finished. Total rows copied: {total_rows}")
+    print("Please verify data and update DATABASE_URL in .env")
+
+if __name__ == "__main__":
+    main()
+PYEOF
+
+  log "Running data migration..."
+  if ! "${py}" "${migrate_script}" "${sqlite_db}" "${pg_url_sync}"; then
+    err "Migration script failed!"
+    rm -f "${migrate_script}"
+    warn "Service is stopped. You can start it again with: ${CMD_NAME} start"
+    die "Database migration failed"
+  fi
+  rm -f "${migrate_script}"
+  ok "Data migration completed"
+
+  # 7. Update .env
+  if [[ -f "${INSTALL_DIR}/.env" ]]; then
+    log "Updating DATABASE_URL in .env..."
+    # Backup .env first
+    cp -a "${INSTALL_DIR}/.env" "${INSTALL_DIR}/.env.bak.$(stamp)"
+
+    if grep -qE '^DATABASE_URL=' "${INSTALL_DIR}/.env"; then
+      # Replace existing
+      sed -i "s|^DATABASE_URL=.*|DATABASE_URL=${pg_url}|" "${INSTALL_DIR}/.env"
+    else
+      echo "DATABASE_URL=${pg_url}" >> "${INSTALL_DIR}/.env"
+    fi
+    ok ".env updated with new DATABASE_URL"
+  else
+    warn ".env not found — please set DATABASE_URL manually"
+  fi
+
+  # 8. Restart + health
+  fix_perms
+  run_preflight || true
+
+  echo
+  if confirm "سرویس را الان استارت کنم؟"; then
+    if service_start && health_check; then
+      ok "Migration successful! Bot is running with PostgreSQL."
+    else
+      err "Service failed after migration."
+      warn "Check logs: ${CMD_NAME} logs"
+      warn "You can restore SQLite by setting DATABASE_URL back and restoring backup."
+    fi
+  else
+    info "Service left stopped. Start manually when ready."
+  fi
+
+  echo
+  ok "Done. Keep the safety backup until you verify everything works."
 }
 
 # ======================== Repair ========================
@@ -872,7 +1096,6 @@ do_repair() {
         fi
       else
         ok ".env exists"
-        # Check critical keys
         for key in BOT_TOKEN; do
           if ! grep -qE "^${key}=.+" "${INSTALL_DIR}/.env" 2>/dev/null; then
             warn "${key} seems empty or missing"
@@ -881,12 +1104,21 @@ do_repair() {
       fi
       ;;
     6)
-      ASSUME_YES=1
-      do_repair <<< "1"
-      do_repair <<< "2"
-      do_repair <<< "3"
-      do_repair <<< "4"
-      do_repair <<< "5"
+      log "Running full repair..."
+      # simplified sequential
+      if [[ -d "${INSTALL_DIR}/.venv" ]]; then rm -rf "${INSTALL_DIR}/.venv"; fi
+      python3 -m venv "${INSTALL_DIR}/.venv"
+      "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip -q
+      local req=""
+      [[ -f "${INSTALL_DIR}/requirements.txt" ]] && req="${INSTALL_DIR}/requirements.txt"
+      [[ -f "${INSTALL_DIR}/deploy/requirements.txt" ]] && req="${INSTALL_DIR}/deploy/requirements.txt"
+      [[ -n "${req}" ]] && "${INSTALL_DIR}/.venv/bin/pip" install -r "${req}" -q
+      fix_perms
+      if [[ -f "${INSTALL_DIR}/deploy/systemd.service" ]]; then
+        cp -a "${INSTALL_DIR}/deploy/systemd.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+        systemctl daemon-reload
+        systemctl enable "${SERVICE_NAME}" 2>/dev/null || true
+      fi
       ok "Full repair attempted"
       ;;
     0) return ;;
@@ -935,10 +1167,13 @@ do_doctor() {
     else
       warn "BOT_TOKEN not found or empty"
     fi
-    if grep -qE '^CREDENTIAL_ENCRYPTION_KEY=.+' "${INSTALL_DIR}/.env" 2>/dev/null; then
-      ok "CREDENTIAL_ENCRYPTION_KEY set"
+    # Show current DB type
+    if grep -qE '^DATABASE_URL=.*postgres' "${INSTALL_DIR}/.env" 2>/dev/null; then
+      ok "DATABASE_URL → PostgreSQL"
+    elif grep -qE '^DATABASE_URL=.*sqlite' "${INSTALL_DIR}/.env" 2>/dev/null; then
+      info "DATABASE_URL → SQLite"
     else
-      warn "CREDENTIAL_ENCRYPTION_KEY empty"
+      info "DATABASE_URL not set (default SQLite)"
     fi
   else
     err ".env missing"; fail=1
@@ -946,17 +1181,18 @@ do_doctor() {
 
   echo
   echo -e "${BLD}── Database ────────────────────────────${NC}"
-  if [[ -f "${INSTALL_DIR}/storage/nexusnet.db" ]]; then
-    ok "SQLite DB present"
-    local sz; sz="$(du -h "${INSTALL_DIR}/storage/nexusnet.db" | awk '{print $1}')"
-    echo "    Size: ${sz}"
+  local db
+  db="$(find_sqlite_db 2>/dev/null || true)"
+  if [[ -n "$db" ]]; then
+    ok "SQLite DB: $db"
+    echo "    Size: $(du -h "$db" | awk '{print $1}')"
     if has_cmd sqlite3; then
       local users
-      users="$(sqlite3 "${INSTALL_DIR}/storage/nexusnet.db" 'SELECT count(*) FROM users;' 2>/dev/null || echo '?')"
+      users="$(sqlite3 "$db" 'SELECT count(*) FROM users;' 2>/dev/null || echo '?')"
       echo "    Users: ${users}"
     fi
   else
-    warn "nexusnet.db not found under storage/"
+    info "No local SQLite DB found (maybe using PostgreSQL)"
   fi
 
   echo
@@ -976,7 +1212,6 @@ do_doctor() {
   echo -e "${BLD}── Preflight ───────────────────────────${NC}"
   run_preflight || fail=1
 
-  # Write summary to report
   {
     echo "Version: ${ver}"
     echo "Fail count: ${fail}"
@@ -1034,8 +1269,10 @@ do_status() {
   else
     warn "No systemd unit"
   fi
-  if [[ -f "${INSTALL_DIR}/storage/nexusnet.db" ]]; then
-    echo "DB Size : $(du -h "${INSTALL_DIR}/storage/nexusnet.db" | awk '{print $1}')"
+  local db
+  db="$(find_sqlite_db 2>/dev/null || true)"
+  if [[ -n "$db" ]]; then
+    echo "SQLite  : $db ($(du -h "$db" | awk '{print $1}'))"
   fi
 }
 
@@ -1144,12 +1381,13 @@ main_menu() {
     echo -e "${BLD}  1)${NC} Update NexusNet"
     echo -e "${BLD}  2)${NC} Backup"
     echo -e "${BLD}  3)${NC} Restore"
-    echo -e "${BLD}  4)${NC} Migrate (Export / Import / SSH)"
-    echo -e "${BLD}  5)${NC} Repair Installation"
-    echo -e "${BLD}  6)${NC} Diagnostics (Doctor)"
-    echo -e "${BLD}  7)${NC} Service Management"
-    echo -e "${BLD}  8)${NC} Version Manager"
-    echo -e "${BLD}  9)${NC} Uninstall"
+    echo -e "${BLD}  4)${NC} Migrate VPS (Export / Import / SSH)"
+    echo -e "${BLD}  5)${NC} DB Migrate (SQLite → PostgreSQL)"
+    echo -e "${BLD}  6)${NC} Repair Installation"
+    echo -e "${BLD}  7)${NC} Diagnostics (Doctor)"
+    echo -e "${BLD}  8)${NC} Service Management"
+    echo -e "${BLD}  9)${NC} Version Manager"
+    echo -e "${BLD} 10)${NC} Uninstall"
     echo -e "${BLD}  0)${NC} Exit"
     echo
     read -r -p "  Select: " choice
@@ -1181,11 +1419,12 @@ main_menu() {
         esac
         pause
         ;;
-      5) do_repair; pause ;;
-      6) do_doctor; pause ;;
-      7) do_service_menu ;;
-      8) do_version_menu; pause ;;
-      9) do_uninstall; pause ;;
+      5) do_db_migrate_to_postgres; pause ;;
+      6) do_repair; pause ;;
+      7) do_doctor; pause ;;
+      8) do_service_menu ;;
+      9) do_version_menu; pause ;;
+      10) do_uninstall; pause ;;
       0) echo "Bye."; exit 0 ;;
       *) warn "Invalid choice" ; sleep 1 ;;
     esac
@@ -1196,55 +1435,54 @@ main_menu() {
 usage() {
   cat << EOF
 NexusNet Manager — ${INSTALL_DIR}
+Command: ${CMD_NAME}
 
 Usage:
-  bash $0                    Interactive menu
-  sudo bash $0 <command>     Command mode
+  ${CMD_NAME}                         Interactive menu
+  sudo ${CMD_NAME} <command>          Command mode
 
 Commands:
-  status                     وضعیت سرویس و نسخه
-  logs [N]                   آخرین N خط لاگ (پیش‌فرض 80)
-  doctor                     بررسی سلامت نصب
+  status                              وضعیت سرویس و نسخه
+  logs [N]                            آخرین N خط لاگ (پیش‌فرض 80)
+  doctor                              بررسی سلامت نصب
 
-  start | stop | restart     مدیریت سرویس
+  start | stop | restart              مدیریت سرویس
 
   backup [full|db|config|storage]
-  restore [path]             ریستور (interactive اگر path ندی)
-  update [version|zip]       آپدیت با rollback خودکار
-  rollback [dir]             بازگشت به نسخه قبلی
+  restore [path]                      ریستور (interactive اگر path ندی)
+  update [version|zip]                آپدیت با rollback خودکار
+  rollback [dir]                      بازگشت به نسخه قبلی
 
-  export-migrate             بسته مهاجرت
-  import-migrate <pkg>       وارد کردن بسته مهاجرت
-  migrate                    Server-to-Server via SSH
+  export-migrate                      بسته مهاجرت VPS
+  import-migrate <pkg>                وارد کردن بسته مهاجرت
+  migrate                             Server-to-Server via SSH
 
-  repair                     منوی تعمیر
-  version                    منوی نسخه
-  uninstall                  حذف نصب
+  db-migrate                          مهاجرت SQLite → PostgreSQL
 
-  --dry-run                  فقط شبیه‌سازی (با update)
+  repair                              منوی تعمیر
+  version                             منوی نسخه
+  uninstall                           حذف نصب
 
-Env overrides:
-  INSTALL_DIR  SERVICE_NAME  BACKUP_ROOT  SERVICE_USER
-  KEEP_BACKUPS  ASSUME_YES=1  DRY_RUN=1  REPO
+  --dry-run                           فقط شبیه‌سازی (با update)
+  --yes / -y                          بدون تایید
 
 Examples:
-  sudo bash $0 backup
-  sudo bash $0 update
-  sudo bash $0 update v36.4.0
-  sudo bash $0 update --dry-run
-  sudo bash $0 restore
-  sudo bash $0 doctor
+  sudo ${CMD_NAME} backup
+  sudo ${CMD_NAME} update
+  sudo ${CMD_NAME} db-migrate
+  sudo ${CMD_NAME} doctor
 EOF
 }
 
 # ======================== Entry Point ========================
-# Handle global flags
 for arg in "$@"; do
   case "${arg}" in
-    --dry-run) DRY_RUN=1 ; shift || true ;;
-    --yes|-y)  ASSUME_YES=1 ; shift || true ;;
+    --dry-run) DRY_RUN=1 ;;
+    --yes|-y)  ASSUME_YES=1 ;;
   esac
 done
+# remove flags from positional
+set -- $(printf '%s\n' "$@" | grep -vE '^(--dry-run|--yes|-y)$' || true)
 
 cmd="${1:-}"
 shift || true
@@ -1264,6 +1502,7 @@ case "${cmd}" in
   export-migrate)    do_export_migrate ;;
   import-migrate)    do_import_migrate "${1:-}" ;;
   migrate)           do_ssh_migrate ;;
+  db-migrate)        do_db_migrate_to_postgres ;;
   repair)            do_repair ;;
   version)           do_version_menu ;;
   uninstall)         do_uninstall ;;
