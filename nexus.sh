@@ -38,7 +38,7 @@ info() { echo -e "${CYN}ℹ${NC}  $*"; }
 
 need_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    die "این دستور را با root اجرا کن: sudo ${CMD_NAME} $*"
+    die "Run as root: sudo ${CMD_NAME} $*"
   fi
 }
 
@@ -46,7 +46,7 @@ stamp() { date +%Y%m%d_%H%M%S; }
 human_date() { date '+%Y-%m-%d %H:%M'; }
 
 confirm() {
-  local msg="${1:-ادامه؟}"
+  local msg="${1:-Continue?}"
   if [[ "${ASSUME_YES}" == "1" ]]; then return 0; fi
   read -r -p "$(echo -e "${YLW}${msg} [y/N] ${NC}")" ans
   [[ "${ans}" == "y" || "${ans}" == "Y" || "${ans}" == "yes" ]]
@@ -54,7 +54,7 @@ confirm() {
 
 pause() {
   if [[ "${ASSUME_YES}" != "1" ]]; then
-    read -r -p "Enter برای ادامه..."
+    read -r -p "Press Enter to continue..."
   fi
 }
 
@@ -251,8 +251,7 @@ EOF
 
 do_backup() {
   need_root
-  [[ -d "${INSTALL_DIR}" ]] || die "Install dir not found: ${INSTALL_DIR}
-ابتدا بات را نصب کنید یا INSTALL_DIR را درست تنظیم کنید."
+  [[ -d "${INSTALL_DIR}" ]] || die "Install dir not found: ${INSTALL_DIR}. Install the bot first or set INSTALL_DIR."
 
   local mode="${1:-full}"
   local ts; ts="$(stamp)"
@@ -388,7 +387,7 @@ do_restore() {
     esac
   fi
 
-  confirm "⚠ این عملیات روی ${INSTALL_DIR} اعمال می‌شود. سرویس متوقف خواهد شد." || die "Cancelled"
+  confirm "WARNING: This will modify ${INSTALL_DIR}. Service will be stopped." || die "Cancelled"
 
   log "Creating safety backup of current state..."
   ASSUME_YES=1 do_backup full >/dev/null || true
@@ -486,7 +485,7 @@ do_update() {
     return 0
   fi
 
-  confirm "آپدیت به ${target_version} انجام شود؟" || die "Cancelled"
+  confirm "Update to ${target_version}?" || die "Cancelled"
 
   log "Creating pre-update backup..."
   local backup_path
@@ -559,13 +558,41 @@ do_update() {
   fi
 
   fix_perms
+
+  # Ensure VERSION file exists (extract from zip name or tag if missing)
+  if [[ ! -f "${INSTALL_DIR}/VERSION" ]]; then
+    local inferred=""
+    if [[ "${target_version}" =~ [Vv]?([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
+      inferred="${BASH_REMATCH[1]}"
+    elif [[ "${target_version}" == *.zip ]]; then
+      local base; base="$(basename "${target_version}" .zip)"
+      if [[ "${base}" =~ [Vv]?([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
+        inferred="${BASH_REMATCH[1]}"
+      fi
+    else
+      inferred="${target_version}"
+    fi
+    if [[ -n "${inferred}" ]]; then
+      echo "${inferred}" > "${INSTALL_DIR}/VERSION"
+      ok "VERSION file written: ${inferred}"
+    fi
+  fi
+
   run_preflight || warn "Preflight failed"
 
+  local new_version
+  new_version="$(get_installed_version)"
+
   if service_start && health_check; then
-    ok "Update to ${target_version} successful!"
+    echo
+    ok "Update successful!"
+    echo -e "  Previous : ${current_version}"
+    echo -e "  Current  : ${BLD}${new_version}${NC}"
+    echo
     ls -1dt "${BACKUP_ROOT}"/rollback-*/ 2>/dev/null | tail -n +4 | xargs -r rm -rf
   else
     err "Health check FAILED after update!"
+    echo -e "  Attempted version: ${new_version}"
     echo
     if confirm "Rollback to previous version?"; then
       do_rollback "${rollback_dir}"
@@ -606,7 +633,7 @@ do_rollback() {
   fi
 
   [[ -d "${rb_dir}" ]] || die "Rollback directory not found"
-  confirm "Rollback from ${rb_dir}؟" || die "Cancelled"
+  confirm "Rollback from ${rb_dir}?" || die "Cancelled"
 
   service_stop
 
@@ -627,7 +654,10 @@ do_rollback() {
   fix_perms
   run_preflight || true
   service_start
+  local rb_ver
+  rb_ver="$(get_installed_version)"
   ok "Rollback completed"
+  echo -e "  Current version: ${BLD}${rb_ver}${NC}"
 }
 
 # ======================== VPS Migrate ========================
@@ -640,7 +670,7 @@ do_export_migrate() {
   mkdir -p "${dest}"
 
   log "Creating migration package → ${dest}"
-  if confirm "سرویس برای بکاپ تمیز متوقف شود؟ (توصیه می‌شود)"; then
+  if confirm "Stop service for a clean backup? (recommended)"; then
     service_stop
   fi
 
@@ -661,7 +691,7 @@ do_export_migrate() {
 
   ok "Migration package ready: ${tar_path}"
   echo
-  echo -e "${BLD}روی VPS جدید:${NC}"
+  echo -e "${BLD}On the new VPS:${NC}"
   echo "  1) bash <(curl -fsSL https://raw.githubusercontent.com/${REPO}/${MANAGER_BRANCH}/install.sh)"
   echo "  2) sudo ${CMD_NAME} import-migrate ${tar_path}"
   echo "  3) sudo ${CMD_NAME} doctor"
@@ -682,7 +712,7 @@ do_import_migrate() {
   fi
   [[ -d "${work}" ]] || die "Package not found"
   [[ -f "${work}/manifest.json" ]] && cat "${work}/manifest.json"
-  confirm "داده از بسته مهاجرت روی این سرور اعمال شود؟" || die "Cancelled"
+  confirm "Apply migration package data on this server?" || die "Cancelled"
 
   service_stop
 
@@ -754,7 +784,7 @@ do_ssh_migrate() {
   dest_info=$("${ssh_cmd[@]}" "echo \"OS=\$(uname -s); RAM=\$(free -m | awk '/Mem/{print \$2}'); DISK=\$(df -m / | awk 'NR==2{print \$4}'); PYTHON=\$(python3 --version 2>/dev/null || echo none)\"")
   echo "  ${dest_info}"
 
-  confirm "ادامه مهاجرت به ${dest_ip}؟" || die "Cancelled"
+  confirm "Continue migration to ${dest_ip}?" || die "Cancelled"
 
   log "Creating migration package on source..."
   ASSUME_YES=1 do_export_migrate >/dev/null
@@ -795,15 +825,15 @@ do_db_migrate_to_postgres() {
   echo
   echo -e "${BLD}══ SQLite → PostgreSQL Migration ══${NC}"
   echo
-  info "این ابزار داده‌های فعلی SQLite را به PostgreSQL منتقل می‌کند."
-  info "بات از نسخه 1.3.1 از PostgreSQL پشتیبانی می‌کند."
+  info "This tool migrates current SQLite data to PostgreSQL."
+  info "Bot supports PostgreSQL since version 1.3.1."
   echo
 
   # 1. Find SQLite DB
   local sqlite_db
   sqlite_db="$(find_sqlite_db 2>/dev/null || true)"
   if [[ -z "${sqlite_db}" ]]; then
-    echo "فایل SQLite پیدا نشد. مسیر دقیق را وارد کنید:"
+    echo "SQLite file not found. Enter exact path:"
     read -r -p "Path to .db file: " sqlite_db
     [[ -f "${sqlite_db}" ]] || die "File not found: ${sqlite_db}"
   else
@@ -826,9 +856,9 @@ do_db_migrate_to_postgres() {
   # 2. Get PostgreSQL connection info
   echo
   echo -e "${BLD}PostgreSQL Connection:${NC}"
-  echo "مثال DATABASE_URL:"
+  echo "Example DATABASE_URL:"
   echo "  postgresql+asyncpg://user:password@localhost:5432/nexusnet"
-  echo "  یا: postgresql://user:password@host:5432/dbname"
+  echo "  or: postgresql://user:password@host:5432/dbname"
   echo
   read -r -p "PostgreSQL DATABASE_URL: " pg_url
   [[ -n "${pg_url}" ]] || die "DATABASE_URL required"
@@ -841,14 +871,14 @@ do_db_migrate_to_postgres() {
 
   # 3. Confirm
   echo
-  warn "این عملیات:"
-  echo "  1. از SQLite فعلی بکاپ می‌گیرد"
-  echo "  2. سرویس را متوقف می‌کند"
-  echo "  3. داده‌ها را به PostgreSQL کپی می‌کند"
-  echo "  4. فایل .env را آپدیت می‌کند (DATABASE_URL)"
-  echo "  5. سرویس را دوباره استارت می‌کند"
+  warn "This will:"
+  echo "  1. Backup current SQLite"
+  echo "  2. Stop the service"
+  echo "  3. Copy data to PostgreSQL"
+  echo "  4. Update .env (DATABASE_URL)"
+  echo "  5. Start the service again"
   echo
-  confirm "ادامه؟" || die "Cancelled"
+  confirm "Continue?" || die "Cancelled"
 
   # 4. Safety backup
   log "Creating safety backup..."
@@ -1015,7 +1045,7 @@ PYEOF
   run_preflight || true
 
   echo
-  if confirm "سرویس را الان استارت کنم؟"; then
+  if confirm "Start the service now?"; then
     if service_start && health_check; then
       ok "Migration successful! Bot is running with PostgreSQL."
     else
@@ -1344,7 +1374,7 @@ do_uninstall() {
       ok "Application + service removed. Backups kept."
       ;;
     3)
-      confirm "⚠ DELETE EVERYTHING including all backups؟" || die "Cancelled"
+      confirm "WARNING: DELETE EVERYTHING including all backups?" || die "Cancelled"
       confirm "Really sure? This cannot be undone." || die "Cancelled"
       service_stop
       systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
@@ -1442,29 +1472,29 @@ Usage:
   sudo ${CMD_NAME} <command>          Command mode
 
 Commands:
-  status                              وضعیت سرویس و نسخه
-  logs [N]                            آخرین N خط لاگ (پیش‌فرض 80)
-  doctor                              بررسی سلامت نصب
+  status                              Service status and version
+  logs [N]                            Last N log lines (default 80)
+  doctor                              Health check
 
-  start | stop | restart              مدیریت سرویس
+  start | stop | restart              Service control
 
   backup [full|db|config|storage]
-  restore [path]                      ریستور (interactive اگر path ندی)
-  update [version|zip]                آپدیت با rollback خودکار
-  rollback [dir]                      بازگشت به نسخه قبلی
+  restore [path]                      Restore (interactive if no path)
+  update [version|zip]                Update with auto-rollback
+  rollback [dir]                      Rollback to previous version
 
-  export-migrate                      بسته مهاجرت VPS
-  import-migrate <pkg>                وارد کردن بسته مهاجرت
+  export-migrate                      Export VPS migration package
+  import-migrate <pkg>                Import migration package
   migrate                             Server-to-Server via SSH
 
-  db-migrate                          مهاجرت SQLite → PostgreSQL
+  db-migrate                          Migrate SQLite to PostgreSQL
 
-  repair                              منوی تعمیر
-  version                             منوی نسخه
-  uninstall                           حذف نصب
+  repair                              Repair menu
+  version                             Version menu
+  uninstall                           Uninstall
 
-  --dry-run                           فقط شبیه‌سازی (با update)
-  --yes / -y                          بدون تایید
+  --dry-run                           Dry-run (with update)
+  --yes / -y                          Skip confirmations
 
 Examples:
   sudo ${CMD_NAME} backup
@@ -1507,5 +1537,5 @@ case "${cmd}" in
   version)           do_version_menu ;;
   uninstall)         do_uninstall ;;
   -h|--help|help)    usage ;;
-  *)                 die "Unknown command: ${cmd}  (help برای راهنما)" ;;
+  *)                 die "Unknown command: ${cmd}  (use: help)" ;;
 esac
