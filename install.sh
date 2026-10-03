@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NexusNet Bot Manager — Bootstrap (does NOT install the bot)
+# NexusNet Bot Manager — Bootstrap
 # bash <(curl -fsSL https://raw.githubusercontent.com/SiNaKeEn/NexusNet-Bot/Manager/install.sh)
 set -euo pipefail
 
