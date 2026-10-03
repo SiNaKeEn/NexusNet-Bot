@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# NexusNet Bot Manager
+# NexusNet Bot Manager v1.0.0
 # Command: nexusnetmanager
-# Bot updates: local ZIP only (upload to /root)
-# Manager updates: from GitHub (Manager branch)
+# Bot updates: local ZIP in /root only
+# Manager updates: GitHub Manager branch
 # =============================================================================
 set -euo pipefail
 
@@ -18,49 +18,57 @@ ASSUME_YES="${ASSUME_YES:-0}"
 CMD_NAME="nexusnetmanager"
 MANAGER_VERSION="1.0.0"
 
-RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[0;33m'
-BLU=$'\033[0;34m'; CYN=$'\033[0;36m'; BLD=$'\033[1m'; NC=$'\033[0m'
+# Colors (match NexusNet Node style)
+CYAN=$'\033[1;36m'
+GREEN=$'\033[1;32m'
+RED=$'\033[1;31m'
+YLW=$'\033[1;33m'
+BLU=$'\033[1;34m'
+DIM=$'\033[2m'
+BLD=$'\033[1m'
+NC=$'\033[0m'
 
-log()  { echo -e "${BLU}[*]${NC} $*"; }
-ok()   { echo -e "${GRN}[+]${NC} $*"; }
+log()  { echo -e "${CYAN}[*]${NC} $*"; }
+ok()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YLW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[-]${NC} $*" >&2; }
 die()  { err "$*"; exit 1; }
-info() { echo -e "${CYN}[i]${NC} $*"; }
+info() { echo -e "${BLU}[i]${NC} $*"; }
 
 need_root() {
-  if [[ "${EUID}" -ne 0 ]]; then
-    die "Please run as root: sudo ${CMD_NAME}"
-  fi
+  [[ "${EUID}" -eq 0 ]] || die "Please run as root: sudo ${CMD_NAME}"
 }
 
 stamp() { date +%Y%m%d_%H%M%S; }
 
 confirm() {
   local msg="${1:-Continue?}"
-  if [[ "${ASSUME_YES}" == "1" ]]; then return 0; fi
+  [[ "${ASSUME_YES}" == "1" ]] && return 0
   read -r -p "$(echo -e "${YLW}${msg} [y/N] ${NC}")" ans
   [[ "${ans}" == "y" || "${ans}" == "Y" || "${ans}" == "yes" ]]
 }
 
 pause() {
-  if [[ "${ASSUME_YES}" != "1" ]]; then
-    read -r -p "Press Enter to continue..."
-  fi
+  [[ "${ASSUME_YES}" == "1" ]] && return 0
+  read -r -p "Press Enter to continue..."
 }
 
 has_cmd() { command -v "$1" &>/dev/null; }
 
-# ======================== Service ========================
+# ======================== Service helpers ========================
 has_service() {
   systemctl list-unit-files --type=service 2>/dev/null | grep -q "^${SERVICE_NAME}\.service" \
     || [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]
 }
 
+service_is_active() {
+  has_service && systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null
+}
+
 service_stop() {
-  if has_service && systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+  if service_is_active; then
     log "Stopping ${SERVICE_NAME}..."
-    systemctl stop "${SERVICE_NAME}" || warn "stop failed (continuing)"
+    systemctl stop "${SERVICE_NAME}" || warn "stop failed"
   fi
 }
 
@@ -69,26 +77,23 @@ service_start() {
     log "Starting ${SERVICE_NAME}..."
     systemctl start "${SERVICE_NAME}"
     sleep 2
-    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    if service_is_active; then
       ok "Service started"
-    else
-      err "Service failed to start"
-      systemctl --no-pager -l status "${SERVICE_NAME}" || true
-      return 1
+      return 0
     fi
-  else
-    warn "Service unit not found"
+    err "Service failed to start"
+    systemctl --no-pager -l status "${SERVICE_NAME}" 2>/dev/null || true
+    return 1
   fi
+  warn "No systemd unit found"
+  return 1
 }
 
 service_restart() {
-  if has_service; then
-    systemctl restart "${SERVICE_NAME}"
-    sleep 2
-    systemctl --no-pager -l status "${SERVICE_NAME}" || true
-  else
-    warn "Service unit not found"
-  fi
+  has_service || { warn "No systemd unit"; return 1; }
+  systemctl restart "${SERVICE_NAME}"
+  sleep 2
+  systemctl --no-pager -l status "${SERVICE_NAME}" 2>/dev/null || true
 }
 
 fix_perms() {
@@ -109,7 +114,6 @@ run_preflight() {
       return 1
     fi
     ok "Preflight passed"
-    return 0
   fi
   return 0
 }
@@ -119,6 +123,97 @@ get_bot_version() {
     tr -d '[:space:]' < "${INSTALL_DIR}/VERSION"
   else
     echo "not installed"
+  fi
+}
+
+get_service_status() {
+  if service_is_active; then
+    echo -e "${GREEN}Active${NC}"
+  elif has_service; then
+    echo -e "${RED}Stopped${NC}"
+  elif [[ -d "${INSTALL_DIR}" ]]; then
+    echo -e "${YLW}No service${NC}"
+  else
+    echo -e "${DIM}Not installed${NC}"
+  fi
+}
+
+# ======================== ZIP helpers ========================
+find_local_zips() {
+  find /root -maxdepth 1 -type f \( \
+    -iname 'NexusNet*.zip' -o \
+    -iname 'nexusnet*.zip' -o \
+    -iname 'nexus*.zip' \
+  \) 2>/dev/null | sort -r
+}
+
+infer_version_from_name() {
+  local name="$1"
+  if [[ "${name}" =~ [Vv]([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  elif [[ "${name}" =~ ([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo ""
+  fi
+}
+
+pick_zip() {
+  local zips=()
+  while IFS= read -r z; do
+    [[ -n "$z" ]] && zips+=("$z")
+  done < <(find_local_zips)
+
+  if [[ ${#zips[@]} -eq 0 ]]; then
+    echo
+    warn "No bot ZIP found in /root"
+    echo "  Upload first:"
+    echo "    scp NexusNet-V1.3.2.zip root@SERVER:/root/"
+    echo
+    read -r -p "Enter full path to ZIP: " custom
+    custom="${custom//$'\r'/}"
+    [[ -f "${custom}" ]] || die "File not found: ${custom}"
+    printf '%s\n' "${custom}"
+    return
+  fi
+
+  if [[ ${#zips[@]} -eq 1 ]]; then
+    local only="${zips[0]}"
+    local ver; ver="$(infer_version_from_name "$(basename "$only")")"
+    echo
+    ok "Found: $(basename "$only")${ver:+  (v${ver})}"
+    confirm "Use this file?" || die "Cancelled"
+    printf '%s\n' "${only}"
+    return
+  fi
+
+  echo
+  echo -e "${CYAN}Found ZIP files in /root:${NC}"
+  echo -e "${DIM}────────────────────────────────────────${NC}"
+  local i=1
+  for z in "${zips[@]}"; do
+    local sz ver
+    sz=$(du -h "$z" | awk '{print $1}')
+    ver="$(infer_version_from_name "$(basename "$z")")"
+    printf "  ${GREEN}[%d]${NC}  %s  ${DIM}(%s)${NC}${ver:+  v${ver}}\n" "$i" "$(basename "$z")" "$sz"
+    ((i++))
+  done
+  echo -e "${DIM}────────────────────────────────────────${NC}"
+  echo
+  read -r -p "Select number [1-${#zips[@]}]: " choice
+  choice="${choice//$'\r'/}"
+  if ! [[ "${choice}" =~ ^[0-9]+$ ]] || [[ "${choice}" -lt 1 || "${choice}" -gt ${#zips[@]} ]]; then
+    die "Invalid selection. Enter a number between 1 and ${#zips[@]}"
+  fi
+  printf '%s\n' "${zips[$((choice-1))]}"
+}
+
+extract_zip_source() {
+  local zip_path="$1" tmp="$2"
+  unzip -q "${zip_path}" -d "${tmp}"
+  if [[ -d "${tmp}/nexus_v36" ]]; then echo "${tmp}/nexus_v36"
+  elif [[ -d "${tmp}/nexus_bot" ]]; then echo "${tmp}/nexus_bot"
+  else find "${tmp}" -mindepth 1 -maxdepth 1 -type d | head -n1
   fi
 }
 
@@ -133,14 +228,13 @@ do_backup() {
   mkdir -p "${dest}"
 
   log "Backup -> ${dest} (${mode})"
-
   [[ -f "${INSTALL_DIR}/.env" ]] && cp -a "${INSTALL_DIR}/.env" "${dest}/.env"
   [[ -f "${INSTALL_DIR}/VERSION" ]] && cp -a "${INSTALL_DIR}/VERSION" "${dest}/VERSION"
 
   case "${mode}" in
     full)
       [[ -d "${INSTALL_DIR}/storage" ]] && cp -a "${INSTALL_DIR}/storage" "${dest}/storage"
-      [[ -d "${INSTALL_DIR}/data" ]]    && cp -a "${INSTALL_DIR}/data"    "${dest}/data"
+      [[ -d "${INSTALL_DIR}/data" ]] && cp -a "${INSTALL_DIR}/data" "${dest}/data"
       ;;
     db)
       mkdir -p "${dest}/database"
@@ -150,7 +244,7 @@ do_backup() {
         cp -a "${INSTALL_DIR}/storage" "${dest}/storage"
       fi
       ;;
-    *) die "Unknown mode: ${mode} (full|db)" ;;
+    *) die "Unknown mode (full|db)" ;;
   esac
 
   {
@@ -169,7 +263,6 @@ do_backup() {
   n="$(ls -1t "${BACKUP_ROOT}"/nexusnet-backup-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
   if [[ "${n}" -gt "${KEEP_BACKUPS}" ]]; then
     ls -1t "${BACKUP_ROOT}"/nexusnet-backup-*.tar.gz | tail -n +"$((KEEP_BACKUPS + 1))" | xargs -r rm -f
-    log "Pruned old backups (kept ${KEEP_BACKUPS})"
   fi
   echo "${tar_path}"
 }
@@ -181,25 +274,26 @@ do_restore() {
 
   local src="${1:-}"
   if [[ -z "${src}" ]]; then
-    echo
-    echo -e "${BLD}Available backups:${NC}"
     local backups=()
     local i=1
+    echo
+    echo -e "${CYAN}Available backups:${NC}"
+    echo -e "${DIM}────────────────────────────────────────${NC}"
     while IFS= read -r b; do
       [[ -z "$b" ]] && continue
       backups+=("$b")
       local name ver="?"
       name=$(basename "$b")
       [[ -f "${b}/meta.txt" ]] && ver=$(grep '^version=' "${b}/meta.txt" 2>/dev/null | cut -d= -f2)
-      printf "  %2d) %s  (v%s)\n" "$i" "$name" "$ver"
+      printf "  ${GREEN}[%d]${NC}  %s  ${DIM}(v%s)${NC}\n" "$i" "$name" "$ver"
       ((i++))
     done < <(ls -1dt "${BACKUP_ROOT}"/*/ 2>/dev/null | head -15)
-
+    echo -e "${DIM}────────────────────────────────────────${NC}"
     [[ ${#backups[@]} -gt 0 ]] || die "No backups found"
     echo
     read -r -p "Select number: " choice
-    [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 && "${choice}" -le ${#backups[@]} ]] \
-      || die "Invalid selection"
+    choice="${choice//$'\r'/}"
+    [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 && "${choice}" -le ${#backups[@]} ]] || die "Invalid"
     src="${backups[$((choice-1))]}"
   fi
 
@@ -211,8 +305,7 @@ do_restore() {
   fi
   [[ -d "${work}" ]] || die "Backup not found"
 
-  echo
-  info "Restore from: ${work}"
+  info "Restore from: $(basename "${work}")"
   [[ -f "${work}/meta.txt" ]] && cat "${work}/meta.txt"
   confirm "WARNING: Service will stop. Continue?" || die "Cancelled"
 
@@ -239,103 +332,30 @@ do_restore() {
 }
 
 # ======================== Install Bot ========================
-find_local_zips() {
-  # Look in /root for bot zip files
-  find /root -maxdepth 1 -type f \( -iname 'NexusNet*.zip' -o -iname 'nexus*.zip' -o -iname '*nexusnet*.zip' \) 2>/dev/null | sort -r
-}
-
-pick_zip() {
-  local zips=()
-  while IFS= read -r z; do
-    [[ -n "$z" ]] && zips+=("$z")
-  done < <(find_local_zips)
-
-  if [[ ${#zips[@]} -eq 0 ]]; then
-    echo
-    warn "No ZIP found in /root"
-    echo "  Upload a bot ZIP to /root first, e.g.:"
-    echo "    scp NexusNet-V1.3.2.zip root@SERVER:/root/"
-    echo
-    read -r -p "Or enter full path to ZIP: " custom
-    [[ -f "${custom}" ]] || die "File not found: ${custom}"
-    echo "${custom}"
-    return
-  fi
-
-  if [[ ${#zips[@]} -eq 1 ]]; then
-    echo "${zips[0]}"
-    return
-  fi
-
-  echo
-  echo -e "${BLD}Found ZIP files in /root:${NC}"
-  local i=1
-  for z in "${zips[@]}"; do
-    local sz
-    sz=$(du -h "$z" | awk '{print $1}')
-    printf "  %2d) %s  (%s)\n" "$i" "$(basename "$z")" "$sz"
-    ((i++))
-  done
-  echo
-  read -r -p "Select ZIP number: " choice
-  [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 && "${choice}" -le ${#zips[@]} ]] \
-    || die "Invalid selection"
-  echo "${zips[$((choice-1))]}"
-}
-
-extract_zip_source() {
-  local zip_path="$1"
-  local tmp="$2"
-  unzip -q "${zip_path}" -d "${tmp}"
-  if [[ -d "${tmp}/nexus_v36" ]]; then
-    echo "${tmp}/nexus_v36"
-  elif [[ -d "${tmp}/nexus_bot" ]]; then
-    echo "${tmp}/nexus_bot"
-  else
-    find "${tmp}" -mindepth 1 -maxdepth 1 -type d | head -n1
-  fi
-}
-
-infer_version_from_zip() {
-  local zip_path="$1"
-  local base
-  base="$(basename "${zip_path}" .zip)"
-  if [[ "${base}" =~ [Vv]?([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
-    echo "${BASH_REMATCH[1]}"
-  else
-    echo ""
-  fi
-}
-
 do_install_bot() {
   need_root
 
   if [[ -d "${INSTALL_DIR}" ]] && [[ -f "${INSTALL_DIR}/VERSION" || -f "${INSTALL_DIR}/.env" ]]; then
-    warn "Bot appears to be already installed at ${INSTALL_DIR}"
-    echo "  Version: $(get_bot_version)"
-    confirm "Reinstall / overwrite code? (data & .env will be kept)" || die "Cancelled"
+    warn "Bot already installed (v$(get_bot_version))"
+    confirm "Reinstall code? (.env and data will be kept)" || die "Cancelled"
   fi
 
   local zip_path
   zip_path="$(pick_zip)"
-  [[ -f "${zip_path}" ]] || die "ZIP not found"
-  log "Using: ${zip_path}"
+  [[ -f "${zip_path}" ]] || die "ZIP not found: ${zip_path}"
+  log "ZIP: ${zip_path}"
 
   local ver
-  ver="$(infer_version_from_zip "${zip_path}")"
+  ver="$(infer_version_from_name "$(basename "${zip_path}")")"
 
-  # Dependencies
-  log "Installing system dependencies..."
+  log "Installing dependencies..."
   if has_cmd apt-get; then
     apt-get update -qq >/dev/null 2>&1 || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-      python3 python3-venv python3-pip curl unzip tar \
-      >/dev/null 2>&1 || warn "Some packages failed to install"
+      python3 python3-venv python3-pip curl unzip tar >/dev/null 2>&1 || true
   fi
 
-  # Create user
   if ! id "${SERVICE_USER}" &>/dev/null; then
-    log "Creating user ${SERVICE_USER}..."
     useradd --system --home "${INSTALL_DIR}" --shell /usr/sbin/nologin "${SERVICE_USER}" 2>/dev/null || true
   fi
 
@@ -345,66 +365,52 @@ do_install_bot() {
 
   local src
   src="$(extract_zip_source "${zip_path}" "${tmp}")"
-  [[ -d "${src}" ]] || die "Could not find source folder inside ZIP"
+  [[ -d "${src}" ]] || die "Cannot find source folder inside ZIP"
 
-  log "Installing files to ${INSTALL_DIR}..."
-  # Keep existing data
-  local keep_env=0 keep_storage=0 keep_data=0
-  [[ -f "${INSTALL_DIR}/.env" ]] && keep_env=1
-  [[ -d "${INSTALL_DIR}/storage" ]] && keep_storage=1
-  [[ -d "${INSTALL_DIR}/data" ]] && keep_data=1
-
-  # Copy code
+  log "Copying files to ${INSTALL_DIR}..."
   find "${INSTALL_DIR}" -mindepth 1 -maxdepth 1 \
     ! -name '.env' ! -name 'storage' ! -name 'data' ! -name 'backups' ! -name '.venv' \
     -exec rm -rf {} + 2>/dev/null || true
-
   cp -a "${src}/." "${INSTALL_DIR}/"
   mkdir -p "${INSTALL_DIR}/storage" "${INSTALL_DIR}/backups" "${INSTALL_DIR}/data"
 
-  # VERSION
   if [[ -n "${ver}" ]]; then
     echo "${ver}" > "${INSTALL_DIR}/VERSION"
   elif [[ ! -f "${INSTALL_DIR}/VERSION" ]]; then
     echo "unknown" > "${INSTALL_DIR}/VERSION"
   fi
 
-  # .env
   if [[ ! -f "${INSTALL_DIR}/.env" ]]; then
     if [[ -f "${INSTALL_DIR}/.env.example" ]]; then
       cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
-      warn ".env created from example — edit it before starting"
+      warn ".env created from example — edit before start"
     else
-      warn "No .env found — create ${INSTALL_DIR}/.env manually"
+      warn "Create ${INSTALL_DIR}/.env manually"
     fi
   else
     ok ".env preserved"
   fi
 
-  # venv
   if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
     log "Creating Python venv..."
     python3 -m venv "${INSTALL_DIR}/.venv"
   fi
   log "Installing Python packages..."
   "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip -q
-  if [[ -f "${INSTALL_DIR}/requirements.txt" ]]; then
-    "${INSTALL_DIR}/.venv/bin/pip" install -r "${INSTALL_DIR}/requirements.txt" -q
-  elif [[ -f "${INSTALL_DIR}/deploy/requirements.txt" ]]; then
-    "${INSTALL_DIR}/.venv/bin/pip" install -r "${INSTALL_DIR}/deploy/requirements.txt" -q
-  fi
+  local req=""
+  [[ -f "${INSTALL_DIR}/requirements.txt" ]] && req="${INSTALL_DIR}/requirements.txt"
+  [[ -f "${INSTALL_DIR}/deploy/requirements.txt" ]] && req="${INSTALL_DIR}/deploy/requirements.txt"
+  [[ -n "${req}" ]] && "${INSTALL_DIR}/.venv/bin/pip" install -r "${req}" -q
 
-  # systemd
   if [[ -f "${INSTALL_DIR}/deploy/systemd.service" ]]; then
     log "Installing systemd unit..."
     cp -a "${INSTALL_DIR}/deploy/systemd.service" "/etc/systemd/system/${SERVICE_NAME}.service"
-    # fix paths if needed
     sed -i "s|/opt/nexusnet|${INSTALL_DIR}|g" "/etc/systemd/system/${SERVICE_NAME}.service" 2>/dev/null || true
     systemctl daemon-reload
     systemctl enable "${SERVICE_NAME}" >/dev/null 2>&1 || true
     ok "systemd unit installed"
   else
-    warn "deploy/systemd.service not found — configure service manually"
+    warn "deploy/systemd.service not found"
   fi
 
   fix_perms
@@ -413,18 +419,15 @@ do_install_bot() {
   echo
   ok "Install complete"
   echo -e "  Path    : ${INSTALL_DIR}"
-  echo -e "  Version : ${BLD}$(get_bot_version)${NC}"
+  echo -e "  Version : ${GREEN}$(get_bot_version)${NC}"
   echo
-  info "Next steps:"
-  echo "  1. Edit ${INSTALL_DIR}/.env  (BOT_TOKEN, CREDENTIAL_ENCRYPTION_KEY, ...)"
-  echo "  2. sudo ${CMD_NAME}  ->  Service Management  ->  Start"
-  echo "  or: sudo systemctl start ${SERVICE_NAME}"
+  info "Next: edit ${INSTALL_DIR}/.env then start the service (menu 6)"
 }
 
-# ======================== Update Bot (local ZIP only) ========================
+# ======================== Update Bot ========================
 do_update_bot() {
   need_root
-  [[ -d "${INSTALL_DIR}" ]] || die "Bot not installed. Use option 1 first."
+  [[ -d "${INSTALL_DIR}" ]] || die "Bot not installed. Use [1] Install Bot first."
 
   local current
   current="$(get_bot_version)"
@@ -432,12 +435,12 @@ do_update_bot() {
 
   local zip_path
   zip_path="$(pick_zip)"
-  [[ -f "${zip_path}" ]] || die "ZIP not found"
-  log "Using: ${zip_path}"
+  [[ -f "${zip_path}" ]] || die "ZIP not found: ${zip_path}"
+  log "ZIP: ${zip_path}"
 
   local new_ver
-  new_ver="$(infer_version_from_zip "${zip_path}")"
-  [[ -n "${new_ver}" ]] && info "Target version: ${new_ver}"
+  new_ver="$(infer_version_from_name "$(basename "${zip_path}")")"
+  [[ -n "${new_ver}" ]] && info "Detected version: ${new_ver}"
 
   confirm "Update bot from $(basename "${zip_path}")?" || die "Cancelled"
 
@@ -459,27 +462,21 @@ do_update_bot() {
   src="$(extract_zip_source "${zip_path}" "${tmp}")"
   [[ -d "${src}" ]] || die "Source folder not found in ZIP"
 
-  log "Installing new version..."
+  log "Installing new files..."
   find "${INSTALL_DIR}" -mindepth 1 -maxdepth 1 \
     ! -name '.env' ! -name 'storage' ! -name 'data' ! -name 'backups' ! -name '.venv' \
     -exec rm -rf {} + 2>/dev/null || true
-
   cp -a "${src}/." "${INSTALL_DIR}/"
   mkdir -p "${INSTALL_DIR}/storage" "${INSTALL_DIR}/backups"
 
-  if [[ ! -f "${INSTALL_DIR}/.env" && -f "${rollback_dir}/.env" ]]; then
-    cp -a "${rollback_dir}/.env" "${INSTALL_DIR}/.env"
-  fi
+  [[ ! -f "${INSTALL_DIR}/.env" && -f "${rollback_dir}/.env" ]] && cp -a "${rollback_dir}/.env" "${INSTALL_DIR}/.env"
+  [[ -n "${new_ver}" ]] && echo "${new_ver}" > "${INSTALL_DIR}/VERSION"
 
-  if [[ -n "${new_ver}" ]]; then
-    echo "${new_ver}" > "${INSTALL_DIR}/VERSION"
-  fi
-
-  # Refresh deps if requirements changed
-  if [[ -f "${INSTALL_DIR}/requirements.txt" ]] || [[ -f "${INSTALL_DIR}/deploy/requirements.txt" ]]; then
+  local req=""
+  [[ -f "${INSTALL_DIR}/requirements.txt" ]] && req="${INSTALL_DIR}/requirements.txt"
+  [[ -f "${INSTALL_DIR}/deploy/requirements.txt" ]] && req="${INSTALL_DIR}/deploy/requirements.txt"
+  if [[ -n "${req}" && -x "${INSTALL_DIR}/.venv/bin/pip" ]]; then
     log "Updating Python packages..."
-    local req="${INSTALL_DIR}/requirements.txt"
-    [[ -f "${INSTALL_DIR}/deploy/requirements.txt" ]] && req="${INSTALL_DIR}/deploy/requirements.txt"
     "${INSTALL_DIR}/.venv/bin/pip" install -r "${req}" -q 2>/dev/null || true
   fi
 
@@ -491,15 +488,13 @@ do_update_bot() {
 
   if service_start; then
     echo
-    ok "Update successful!"
+    ok "Update successful"
     echo -e "  Previous : ${current}"
-    echo -e "  Current  : ${BLD}${installed_ver}${NC}"
-    echo
-    # keep only last 3 rollbacks
+    echo -e "  Current  : ${GREEN}${installed_ver}${NC}"
     ls -1dt "${BACKUP_ROOT}"/rollback-*/ 2>/dev/null | tail -n +4 | xargs -r rm -rf
   else
     err "Service failed after update"
-    if confirm "Rollback to previous version?"; then
+    if confirm "Rollback?"; then
       do_rollback "${rollback_dir}"
     fi
   fi
@@ -509,14 +504,13 @@ do_rollback() {
   need_root
   local rb_dir="${1:-}"
   if [[ -z "${rb_dir}" ]]; then
-    local points=()
-    local i=1
+    local points=() i=1
     echo
-    echo -e "${BLD}Rollback points:${NC}"
+    echo -e "${CYAN}Rollback points:${NC}"
     while IFS= read -r p; do
       [[ -z "$p" ]] && continue
       points+=("$p")
-      printf "  %2d) %s\n" "$i" "$(basename "$p")"
+      printf "  ${GREEN}[%d]${NC}  %s\n" "$i" "$(basename "$p")"
       ((i++))
     done < <(ls -1dt "${BACKUP_ROOT}"/rollback-*/ 2>/dev/null)
     [[ ${#points[@]} -gt 0 ]] || die "No rollback points"
@@ -539,67 +533,60 @@ do_rollback() {
   ok "Rollback done — version: $(get_bot_version)"
 }
 
-# ======================== Update Manager (GitHub) ========================
+# ======================== Update Manager ========================
 do_update_manager() {
   need_root
   log "Checking GitHub for manager updates..."
   local url="https://raw.githubusercontent.com/${REPO}/${MANAGER_BRANCH}/nexus.sh"
-  local tmp
-  tmp="$(mktemp /tmp/nexus_mgr_XXXXXX.sh)"
+  local tmp; tmp="$(mktemp /tmp/nexus_mgr_XXXXXX.sh)"
   if ! curl -fsSL -o "${tmp}" "${url}"; then
     rm -f "${tmp}"
-    die "Failed to download manager from GitHub"
+    die "Download failed"
   fi
 
-  local remote_ver local_ver
+  local remote_ver
   remote_ver="$(grep -oP 'MANAGER_VERSION="\K[^"]+' "${tmp}" 2>/dev/null || echo "unknown")"
-  local_ver="${MANAGER_VERSION}"
+  info "Local  : ${MANAGER_VERSION}"
+  info "Remote : ${remote_ver}"
 
-  info "Local manager  : ${local_ver}"
-  info "Remote manager : ${remote_ver}"
-
-  if [[ "${remote_ver}" == "${local_ver}" ]]; then
+  if [[ "${remote_ver}" == "${MANAGER_VERSION}" ]]; then
     ok "Manager is up to date"
     rm -f "${tmp}"
     return 0
   fi
 
-  confirm "Update manager ${local_ver} -> ${remote_ver}?" || { rm -f "${tmp}"; die "Cancelled"; }
+  confirm "Update manager ${MANAGER_VERSION} -> ${remote_ver}?" || { rm -f "${tmp}"; return 0; }
 
-  local dest="/usr/local/bin/${CMD_NAME}"
-  cp "${tmp}" "${dest}"
-  chmod +x "${dest}"
-  [[ -d "${INSTALL_DIR}" ]] && cp "${tmp}" "${INSTALL_DIR}/nexus.sh" && chmod +x "${INSTALL_DIR}/nexus.sh"
+  cp "${tmp}" "/usr/local/bin/${CMD_NAME}"
+  chmod +x "/usr/local/bin/${CMD_NAME}"
   rm -f "${tmp}"
   ok "Manager updated to ${remote_ver}"
-  info "Restart the menu to use the new version: sudo ${CMD_NAME}"
+  info "Run again: sudo ${CMD_NAME}"
 }
 
 # ======================== Service menu ========================
 do_service_menu() {
   while true; do
     echo
-    echo -e "${BLD}Service Management${NC}"
-    echo "  1) Start"
-    echo "  2) Stop"
-    echo "  3) Restart"
-    echo "  4) Status"
-    echo "  5) Logs (last 80)"
-    echo "  6) Follow logs"
-    echo "  0) Back"
-    read -r -p "Choice: " c
+    echo -e "${CYAN}── Service Management ──────────────────${NC}"
+    echo -e "  ${GREEN}[1]${NC} » Start"
+    echo -e "  ${GREEN}[2]${NC} » Stop"
+    echo -e "  ${GREEN}[3]${NC} » Restart"
+    echo -e "  ${GREEN}[4]${NC} » Status"
+    echo -e "  ${GREEN}[5]${NC} » Logs (last 80)"
+    echo -e "  ${GREEN}[6]${NC} » Follow logs"
+    echo -e "  ${GREEN}[0]${NC} » Back"
+    echo -e "${CYAN}────────────────────────────────────────${NC}"
+    read -r -p "Enter choice [0-6]: " c
+    c="${c//$'\r'/}"
     case "${c}" in
       1) need_root; service_start; pause ;;
       2) need_root; service_stop; pause ;;
       3) need_root; service_restart; pause ;;
       4)
-        echo "Install : ${INSTALL_DIR}"
-        echo "Version : $(get_bot_version)"
-        if has_service; then
-          systemctl --no-pager -l status "${SERVICE_NAME}" || true
-        else
-          warn "No systemd unit"
-        fi
+        echo "Bot     : $(get_bot_version)"
+        echo "Path    : ${INSTALL_DIR}"
+        has_service && systemctl --no-pager -l status "${SERVICE_NAME}" || warn "No unit"
         pause
         ;;
       5) journalctl -u "${SERVICE_NAME}" -n 80 --no-pager; pause ;;
@@ -615,13 +602,14 @@ do_doctor() {
   need_root
   local fail=0
   echo
-  echo -e "${BLD}── Diagnostics ─────────────────────────${NC}"
+  echo -e "${CYAN}── Diagnostics ─────────────────────────${NC}"
   echo "  OS      : $(uname -srm)"
   echo "  Manager : ${MANAGER_VERSION}"
   echo "  Bot     : $(get_bot_version)"
   echo "  Path    : ${INSTALL_DIR}"
+  echo
 
-  [[ -d "${INSTALL_DIR}" ]] && ok "Install dir exists" || { err "Install dir missing"; fail=1; }
+  [[ -d "${INSTALL_DIR}" ]] && ok "Install dir" || { err "Install dir missing"; fail=1; }
 
   if [[ -x "${INSTALL_DIR}/.venv/bin/python" ]]; then
     ok "Python venv ($("${INSTALL_DIR}/.venv/bin/python" --version 2>&1))"
@@ -631,7 +619,7 @@ do_doctor() {
 
   if [[ -f "${INSTALL_DIR}/.env" ]]; then
     ok ".env exists"
-    grep -qE '^BOT_TOKEN=.+' "${INSTALL_DIR}/.env" 2>/dev/null && ok "BOT_TOKEN set" || warn "BOT_TOKEN empty/missing"
+    grep -qE '^BOT_TOKEN=.+' "${INSTALL_DIR}/.env" 2>/dev/null && ok "BOT_TOKEN set" || warn "BOT_TOKEN empty"
     grep -qE '^CREDENTIAL_ENCRYPTION_KEY=.+' "${INSTALL_DIR}/.env" 2>/dev/null \
       && ok "CREDENTIAL_ENCRYPTION_KEY set" || warn "CREDENTIAL_ENCRYPTION_KEY empty"
   else
@@ -639,42 +627,38 @@ do_doctor() {
   fi
 
   if [[ -f "${INSTALL_DIR}/storage/nexusnet.db" ]]; then
-    ok "SQLite DB present ($(du -h "${INSTALL_DIR}/storage/nexusnet.db" | awk '{print $1}'))"
+    ok "SQLite DB ($(du -h "${INSTALL_DIR}/storage/nexusnet.db" | awk '{print $1}'))"
   else
-    info "No nexusnet.db under storage/ (first run or custom path)"
+    info "No nexusnet.db under storage/"
   fi
 
   if has_service; then
-    systemctl is-active --quiet "${SERVICE_NAME}" && ok "Service active" || { err "Service not active"; fail=1; }
+    service_is_active && ok "Service active" || { err "Service not active"; fail=1; }
   else
     warn "No systemd unit"
   fi
 
   run_preflight || fail=1
-
   echo
-  if [[ "${fail}" -eq 0 ]]; then
-    ok "All critical checks passed"
-  else
-    err "Some checks failed"
-  fi
+  [[ "${fail}" -eq 0 ]] && ok "All critical checks passed" || err "Some checks failed"
 }
 
 # ======================== Uninstall ========================
 do_uninstall() {
   need_root
   echo
-  echo -e "${BLD}Uninstall${NC}"
-  echo "  1) Remove bot (keep backups)"
-  echo "  2) Remove bot + service (keep backups)"
-  echo "  3) Remove everything including backups"
-  echo "  0) Cancel"
-  read -r -p "Choice: " c
+  echo -e "${CYAN}── Uninstall ───────────────────────────${NC}"
+  echo -e "  ${GREEN}[1]${NC} » Remove bot (keep backups)"
+  echo -e "  ${GREEN}[2]${NC} » Remove bot + service (keep backups)"
+  echo -e "  ${GREEN}[3]${NC} » Remove everything"
+  echo -e "  ${GREEN}[0]${NC} » Cancel"
+  echo -e "${CYAN}────────────────────────────────────────${NC}"
+  read -r -p "Enter choice [0-3]: " c
+  c="${c//$'\r'/}"
   case "${c}" in
     1)
       confirm "Remove application files?" || die "Cancelled"
-      service_stop
-      rm -rf "${INSTALL_DIR}"
+      service_stop; rm -rf "${INSTALL_DIR}"
       ok "Removed. Backups kept in ${BACKUP_ROOT}"
       ;;
     2)
@@ -700,44 +684,77 @@ do_uninstall() {
   esac
 }
 
-# ======================== Menu ========================
-show_banner() {
+# ======================== Main Menu (Node-style) ========================
+show_menu() {
   clear 2>/dev/null || true
-  echo -e "${CYN}"
-  cat << 'BANNER'
+  local bot_ver status_line
+  bot_ver="$(get_bot_version)"
+  if service_is_active; then
+    status_line="${GREEN}Active${NC}"
+  elif [[ -d "${INSTALL_DIR}" ]]; then
+    status_line="${YLW}Installed (stopped)${NC}"
+  else
+    status_line="${DIM}Not installed${NC}"
+  fi
+
+  echo -e "${CYAN}"
+  cat << 'TOP'
 ╔══════════════════════════════════════════════════╗
-║              NexusNet Bot Manager                ║
+║          N E X U S N E T  -  Bot Manager         ║
+TOP
+  printf "║              Manager %-28s║\n" "v${MANAGER_VERSION}"
+  cat << 'MID'
+╠══════════════════════════════════════════════════╣
+MID
+  printf "║  Bot     : %-36s║\n" "${bot_ver}"
+  echo -ne "║  Status  : "
+  # status may contain color codes — print plain then pad roughly
+  if service_is_active; then
+    echo -e "${GREEN}Active${CYAN}                               ║"
+  elif [[ -d "${INSTALL_DIR}" ]]; then
+    echo -e "${YLW}Installed (stopped)${CYAN}                  ║"
+  else
+    echo -e "${DIM}Not installed${CYAN}                         ║"
+  fi
+  cat << 'BODY'
+╠══════════════════════════════════════════════════╣
+║                                                  ║
+║  [1] » Install Bot                               ║
+║  [2] » Update Manager                            ║
+║  [3] » Update Bot (local ZIP)                    ║
+║                                                  ║
+╠══════════════════════════════════════════════════╣
+║                                                  ║
+║  [4] » Backup                                    ║
+║  [5] » Restore                                   ║
+║  [6] » Service Management                        ║
+║  [7] » Diagnostics                               ║
+║                                                  ║
+╠══════════════════════════════════════════════════╣
+║                                                  ║
+║  [8] » Uninstall                                 ║
+║  [0] » Exit                                      ║
+║                                                  ║
 ╚══════════════════════════════════════════════════╝
-BANNER
+BODY
   echo -e "${NC}"
-  echo -e "  Manager : ${MANAGER_VERSION}"
-  echo -e "  Bot     : $(get_bot_version)"
-  echo -e "  Path    : ${INSTALL_DIR}"
-  echo
 }
 
 main_menu() {
   while true; do
-    show_banner
-    echo -e "  ${BLD}1)${NC} Install Bot"
-    echo -e "  ${BLD}2)${NC} Update Manager (GitHub)"
-    echo -e "  ${BLD}3)${NC} Update Bot (local ZIP)"
-    echo -e "  ${BLD}4)${NC} Backup"
-    echo -e "  ${BLD}5)${NC} Restore"
-    echo -e "  ${BLD}6)${NC} Service Management"
-    echo -e "  ${BLD}7)${NC} Diagnostics"
-    echo -e "  ${BLD}8)${NC} Uninstall"
-    echo -e "  ${BLD}0)${NC} Exit"
-    echo
-    read -r -p "  Select: " choice
+    show_menu
+    read -r -p "Enter choice [0-8]: " choice
+    choice="${choice//$'\r'/}"
     echo
     case "${choice}" in
       1) do_install_bot; pause ;;
       2) do_update_manager; pause ;;
       3) do_update_bot; pause ;;
       4)
-        echo "  1) Full   2) Database only"
+        echo -e "  ${GREEN}[1]${NC} Full backup"
+        echo -e "  ${GREEN}[2]${NC} Database only"
         read -r -p "Choice [1]: " bt
+        bt="${bt//$'\r'/}"
         case "${bt:-1}" in 2) do_backup db ;; *) do_backup full ;; esac
         pause
         ;;
@@ -755,22 +772,14 @@ usage() {
   cat << EOF
 NexusNet Bot Manager v${MANAGER_VERSION}
 
-Usage:
   ${CMD_NAME}                 Interactive menu
   sudo ${CMD_NAME} <cmd>      Command mode
 
 Commands:
-  install         Install bot from local ZIP in /root
-  update          Update bot from local ZIP
-  update-manager  Update this manager from GitHub
-  backup [full|db]
-  restore [path]
-  rollback
-  start|stop|restart|status|logs
-  doctor
-  uninstall
-
-Bot ZIP: place file in /root (e.g. NexusNet-V1.3.2.zip)
+  install | update | update-manager
+  backup [full|db] | restore [path] | rollback
+  start | stop | restart | status | logs
+  doctor | uninstall
 EOF
 }
 
@@ -799,5 +808,5 @@ case "${cmd}" in
   doctor)          do_doctor ;;
   uninstall)       do_uninstall ;;
   -h|--help|help)  usage ;;
-  *)               die "Unknown command: ${cmd} (try: help)" ;;
+  *)               die "Unknown command: ${cmd}" ;;
 esac
