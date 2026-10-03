@@ -1,6 +1,5 @@
-# NexusNet Bot Manager
-
-Simple control panel for NexusNet Bot.
+[README.md](https://github.com/user-attachments/files/32990866/README.md)
+# NexusNet Bot Manager v1.1.0
 
 ## Install Manager
 
@@ -8,40 +7,37 @@ Simple control panel for NexusNet Bot.
 bash <(curl -fsSL https://raw.githubusercontent.com/SiNaKeEn/NexusNet-Bot/Manager/install.sh)
 ```
 
-Then:
-
 ```bash
 sudo nexusnetmanager
 ```
 
 ## Menu
 
+### Script Management
 | # | Action |
 |---|--------|
-| 1 | Install Bot (from ZIP in `/root`) |
-| 2 | Update Manager (GitHub) |
-| 3 | Update Bot (local ZIP) |
-| 4 | Backup |
-| 5 | Restore |
-| 6 | Service Management |
-| 7 | Diagnostics |
-| 8 | Uninstall |
+| 1 | Install Manager |
+| 2 | Update Manager |
+| 3 | Uninstall Manager |
+
+### Bot Management
+| # | Action |
+|---|--------|
+| 4 | Install Bot |
+| 5 | Update Bot (local ZIP) |
+| 6 | Backup |
+| 7 | Restore |
+| 8 | Service Management |
+| 9 | Diagnostics |
+| 10 | Uninstall Bot |
 | 0 | Exit |
 
 ## Update Bot
 
+Upload ZIP to `/root`:
+
 ```bash
 scp NexusNet-V1.3.2.zip root@SERVER:/root/
-sudo nexusnetmanager
-# choose [3]
 ```
 
-The menu lists ZIP files found in `/root`. Enter the **list number** (1, 2, 3...), not the version string.
-
-## Paths
-
-| Item | Path |
-|------|------|
-| Bot | `/opt/nexusnet` |
-| Backups | `/root/nexusnet-backups` |
-| Manager | `/usr/local/bin/nexusnetmanager` |
+Then menu **[5]** — pick the **list number** (or paste full path).
