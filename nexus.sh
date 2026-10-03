@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# NexusNet Bot Manager v1.0.0
+# NexusNet Bot Manager v1.1.0
 # Command: nexusnetmanager
 # Bot updates: local ZIP in /root only
 # Manager updates: GitHub Manager branch
@@ -16,7 +16,7 @@ REPO="SiNaKeEn/NexusNet-Bot"
 MANAGER_BRANCH="Manager"
 ASSUME_YES="${ASSUME_YES:-0}"
 CMD_NAME="nexusnetmanager"
-MANAGER_VERSION="1.0.0"
+MANAGER_VERSION="1.1.0"
 
 # Colors (match NexusNet Node style)
 CYAN=$'\033[1;36m'
@@ -140,11 +140,13 @@ get_service_status() {
 
 # ======================== ZIP helpers ========================
 find_local_zips() {
-  find /root -maxdepth 1 -type f \( \
-    -iname 'NexusNet*.zip' -o \
-    -iname 'nexusnet*.zip' -o \
-    -iname 'nexus*.zip' \
-  \) 2>/dev/null | sort -r
+  # Broad search in /root (maxdepth 2) for bot packages
+  find /root -maxdepth 2 -type f -iname '*.zip' 2>/dev/null | while read -r f; do
+    local base
+    base="$(basename "$f")"
+    # skip our own manager package names if needed, still show all for user choice
+    echo "$f"
+  done | sort -r
 }
 
 infer_version_from_name() {
@@ -160,52 +162,65 @@ infer_version_from_name() {
 
 pick_zip() {
   local zips=()
-  while IFS= read -r z; do
-    [[ -n "$z" ]] && zips+=("$z")
-  done < <(find_local_zips)
+  local f
+  while IFS= read -r f; do
+    [[ -n "$f" && -f "$f" ]] && zips+=("$f")
+  done < <(find /root -maxdepth 2 -type f -iname '*.zip' 2>/dev/null | sort -r)
 
+  echo
   if [[ ${#zips[@]} -eq 0 ]]; then
-    echo
-    warn "No bot ZIP found in /root"
-    echo "  Upload first:"
+    warn "No .zip files found under /root"
+    echo "  Checked: /root and /root/* (maxdepth 2)"
+    echo "  Upload example:"
     echo "    scp NexusNet-V1.3.2.zip root@SERVER:/root/"
     echo
-    read -r -p "Enter full path to ZIP: " custom
+    # show what is actually in /root
+    log "Files currently in /root:"
+    ls -lah /root 2>/dev/null | head -30 || true
+    echo
+    read -r -p "Enter full path to bot ZIP: " custom
     custom="${custom//$'\r'/}"
+    custom="${custom//\"/}"
+    custom="${custom//\'/}"
     [[ -f "${custom}" ]] || die "File not found: ${custom}"
     printf '%s\n' "${custom}"
     return
   fi
 
-  if [[ ${#zips[@]} -eq 1 ]]; then
-    local only="${zips[0]}"
-    local ver; ver="$(infer_version_from_name "$(basename "$only")")"
-    echo
-    ok "Found: $(basename "$only")${ver:+  (v${ver})}"
-    confirm "Use this file?" || die "Cancelled"
-    printf '%s\n' "${only}"
-    return
-  fi
-
-  echo
-  echo -e "${CYAN}Found ZIP files in /root:${NC}"
+  echo -e "${CYAN}ZIP files found:${NC}"
   echo -e "${DIM}────────────────────────────────────────${NC}"
   local i=1
   for z in "${zips[@]}"; do
-    local sz ver
-    sz=$(du -h "$z" | awk '{print $1}')
-    ver="$(infer_version_from_name "$(basename "$z")")"
-    printf "  ${GREEN}[%d]${NC}  %s  ${DIM}(%s)${NC}${ver:+  v${ver}}\n" "$i" "$(basename "$z")" "$sz"
-    ((i++))
+    local sz ver base
+    base="$(basename "$z")"
+    sz=$(du -h "$z" 2>/dev/null | awk '{print $1}')
+    ver="$(infer_version_from_name "$base")"
+    printf "  ${GREEN}[%d]${NC}  %s  ${DIM}(%s)${NC}" "$i" "$base" "${sz:-?}"
+    [[ -n "$ver" ]] && printf "  v%s" "$ver"
+    printf "\n      ${DIM}%s${NC}\n" "$z"
+    ((i++)) || true
   done
   echo -e "${DIM}────────────────────────────────────────${NC}"
   echo
-  read -r -p "Select number [1-${#zips[@]}]: " choice
+  echo "Enter list number, or full path to a ZIP file."
+  read -r -p "Select [1-${#zips[@]}] or path: " choice
   choice="${choice//$'\r'/}"
-  if ! [[ "${choice}" =~ ^[0-9]+$ ]] || [[ "${choice}" -lt 1 || "${choice}" -gt ${#zips[@]} ]]; then
-    die "Invalid selection. Enter a number between 1 and ${#zips[@]}"
+  choice="${choice//\"/}"
+  choice="${choice//\'/}"
+
+  # path typed directly
+  if [[ -f "${choice}" ]]; then
+    printf '%s\n' "${choice}"
+    return
   fi
-  printf '%s\n' "${zips[$((choice-1))]}"
+
+  # number
+  if [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 && "${choice}" -le ${#zips[@]} ]]; then
+    printf '%s\n' "${zips[$((choice-1))]}"
+    return
+  fi
+
+  die "Invalid selection: ${choice}"
 }
 
 extract_zip_source() {
@@ -687,15 +702,8 @@ do_uninstall() {
 # ======================== Main Menu (Node-style) ========================
 show_menu() {
   clear 2>/dev/null || true
-  local bot_ver status_line
+  local bot_ver
   bot_ver="$(get_bot_version)"
-  if service_is_active; then
-    status_line="${GREEN}Active${NC}"
-  elif [[ -d "${INSTALL_DIR}" ]]; then
-    status_line="${YLW}Installed (stopped)${NC}"
-  else
-    status_line="${DIM}Not installed${NC}"
-  fi
 
   echo -e "${CYAN}"
   cat << 'TOP'
@@ -707,50 +715,78 @@ TOP
 ╠══════════════════════════════════════════════════╣
 MID
   printf "║  Bot     : %-36s║\n" "${bot_ver}"
-  echo -ne "║  Status  : "
-  # status may contain color codes — print plain then pad roughly
   if service_is_active; then
-    echo -e "${GREEN}Active${CYAN}                               ║"
+    echo -e "║  Status  : ${GREEN}Active${CYAN}                               ║"
   elif [[ -d "${INSTALL_DIR}" ]]; then
-    echo -e "${YLW}Installed (stopped)${CYAN}                  ║"
+    echo -e "║  Status  : ${YLW}Installed (stopped)${CYAN}                  ║"
   else
-    echo -e "${DIM}Not installed${CYAN}                         ║"
+    echo -e "║  Status  : ${DIM}Not installed${CYAN}                         ║"
   fi
   cat << 'BODY'
 ╠══════════════════════════════════════════════════╣
-║                                                  ║
-║  [1] » Install Bot                               ║
+║              SCRIPT MANAGEMENT                   ║
+╠══════════════════════════════════════════════════╣
+║  [1] » Install Manager                           ║
 ║  [2] » Update Manager                            ║
-║  [3] » Update Bot (local ZIP)                    ║
-║                                                  ║
+║  [3] » Uninstall Manager                         ║
 ╠══════════════════════════════════════════════════╣
-║                                                  ║
-║  [4] » Backup                                    ║
-║  [5] » Restore                                   ║
-║  [6] » Service Management                        ║
-║  [7] » Diagnostics                               ║
-║                                                  ║
+║                 BOT MANAGEMENT                   ║
 ╠══════════════════════════════════════════════════╣
-║                                                  ║
-║  [8] » Uninstall                                 ║
+║  [4] » Install Bot                               ║
+║  [5] » Update Bot (local ZIP)                    ║
+║  [6] » Backup                                    ║
+║  [7] » Restore                                   ║
+║  [8] » Service Management                        ║
+║  [9] » Diagnostics                               ║
+║ [10] » Uninstall Bot                             ║
+╠══════════════════════════════════════════════════╣
 ║  [0] » Exit                                      ║
-║                                                  ║
 ╚══════════════════════════════════════════════════╝
 BODY
   echo -e "${NC}"
 }
 
+do_install_manager() {
+  need_root
+  local dest="/usr/local/bin/${CMD_NAME}"
+  if [[ -f "${dest}" ]]; then
+    ok "Manager already installed at ${dest}"
+    info "Version: ${MANAGER_VERSION}"
+    confirm "Reinstall/overwrite?" || return 0
+  fi
+  # copy self if we know our path
+  local self
+  self="$(readlink -f "$0" 2>/dev/null || echo "")"
+  if [[ -n "${self}" && -f "${self}" ]]; then
+    cp "${self}" "${dest}"
+    chmod +x "${dest}"
+    ok "Manager installed -> ${dest}"
+  else
+    # fetch from github
+    do_update_manager
+  fi
+}
+
+do_uninstall_manager() {
+  need_root
+  confirm "Remove manager command (${CMD_NAME})? Bot files stay." || die "Cancelled"
+  rm -f "/usr/local/bin/${CMD_NAME}"
+  ok "Manager removed. Bot at ${INSTALL_DIR} was not touched."
+}
+
 main_menu() {
   while true; do
     show_menu
-    read -r -p "Enter choice [0-8]: " choice
+    read -r -p "Enter choice [0-10]: " choice
     choice="${choice//$'\r'/}"
     echo
     case "${choice}" in
-      1) do_install_bot; pause ;;
+      1) do_install_manager; pause ;;
       2) do_update_manager; pause ;;
-      3) do_update_bot; pause ;;
-      4)
+      3) do_uninstall_manager; pause ;;
+      4) do_install_bot; pause ;;
+      5) do_update_bot; pause ;;
+      6)
         echo -e "  ${GREEN}[1]${NC} Full backup"
         echo -e "  ${GREEN}[2]${NC} Database only"
         read -r -p "Choice [1]: " bt
@@ -758,10 +794,10 @@ main_menu() {
         case "${bt:-1}" in 2) do_backup db ;; *) do_backup full ;; esac
         pause
         ;;
-      5) do_restore; pause ;;
-      6) do_service_menu ;;
-      7) do_doctor; pause ;;
-      8) do_uninstall; pause ;;
+      7) do_restore; pause ;;
+      8) do_service_menu ;;
+      9) do_doctor; pause ;;
+      10) do_uninstall; pause ;;
       0) echo "Bye."; exit 0 ;;
       *) warn "Invalid choice"; sleep 1 ;;
     esac
