@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # NexusNet Bootstrap Installer
-# Downloads the Manager and runs it, or installs the bot.
+# Downloads the Manager and installs it as: nexusnetmanager
 # Usage:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/SiNaKeEn/NexusNet-Bot/Manager/install.sh)
 # =============================================================================
@@ -10,7 +10,7 @@ set -euo pipefail
 REPO="SiNaKeEn/NexusNet-Bot"
 MANAGER_BRANCH="Manager"
 INSTALL_DIR="${INSTALL_DIR:-/opt/nexusnet}"
-MANAGER_PATH="/usr/local/bin/nexus"
+MANAGER_PATH="/usr/local/bin/nexusnetmanager"
 
 RED=$'\033[0;31m'; GRN=$'\033[0;32m'; YLW=$'\033[0;33m'
 BLU=$'\033[0;34m'; CYN=$'\033[0;36m'; NC=$'\033[0m'
@@ -62,11 +62,10 @@ rm -f "${TMP_MANAGER}"
 echo
 echo -e "${GRN}Manager is ready!${NC}"
 echo
-echo "Run one of the following:"
-echo "  sudo nexus                 # Interactive menu"
-echo "  sudo nexus doctor          # Health check"
-echo "  sudo nexus update          # Update bot"
-echo "  sudo nexus backup          # Create backup"
-echo
-echo "Or for first-time bot installation, follow the project README."
+echo "Run:"
+echo "  sudo nexusnetmanager              # Interactive menu"
+echo "  sudo nexusnetmanager doctor       # Health check"
+echo "  sudo nexusnetmanager update       # Update bot"
+echo "  sudo nexusnetmanager backup       # Create backup"
+echo "  sudo nexusnetmanager db-migrate   # SQLite → PostgreSQL"
 echo
