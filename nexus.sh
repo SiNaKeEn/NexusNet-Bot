@@ -19,7 +19,7 @@ REPO="SiNaKeEn/NexusNet-Bot"
 MANAGER_BRANCH="Manager"
 ASSUME_YES="${ASSUME_YES:-0}"
 CMD_NAME="nexusnetmanager"
-MANAGER_VERSION="1.2.0"
+MANAGER_VERSION="1.3.0"
 MANAGER_BIN="/usr/local/bin/${CMD_NAME}"
 
 CYAN=$'\033[1;36m'
@@ -135,90 +135,128 @@ infer_version_from_name() {
   fi
 }
 
+# UI goes to stderr so $(pick_zip) only captures the path
+_ui() { echo -e "$@" >&2; }
+
 resolve_zip_path() {
   local input="$1"
   input="${input//$'\r'/}"
   input="${input//\"/}"
   input="${input//\'/}"
+  # trim spaces
   input="${input#"${input%%[![:space:]]*}"}"
   input="${input%"${input##*[![:space:]]}"}"
   [[ -z "${input}" ]] && return 1
-  if [[ -f "${input}" ]]; then printf '%s\n' "${input}"; return 0; fi
-  if [[ -f "/root/${input}" ]]; then printf '%s\n' "/root/${input}"; return 0; fi
-  if [[ -f "/root/${input}.zip" ]]; then printf '%s\n' "/root/${input}.zip"; return 0; fi
+
+  [[ -f "${input}" ]] && { printf '%s\n' "${input}"; return 0; }
+  [[ -f "/root/${input}" ]] && { printf '%s\n' "/root/${input}"; return 0; }
+  [[ -f "/root/${input}.zip" ]] && { printf '%s\n' "/root/${input}.zip"; return 0; }
+
+  # try with NexusNet- prefix / V prefix variants
+  local candidates=(
+    "/root/${input}"
+    "/root/${input}.zip"
+    "/root/NexusNet-${input}.zip"
+    "/root/NexusNet-V${input}.zip"
+    "/root/NexusNet-v${input}.zip"
+    "/root/NexusNet-V${input}"
+    "/root/NexusNet-v${input}"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    [[ -f "$c" ]] && { printf '%s\n' "$c"; return 0; }
+  done
+
   local found
-  found="$(find /root -maxdepth 2 -type f -iname "${input}" 2>/dev/null | head -1)"
-  if [[ -n "${found}" && -f "${found}" ]]; then printf '%s\n' "${found}"; return 0; fi
-  found="$(find /root -maxdepth 2 -type f -iname "${input}.zip" 2>/dev/null | head -1)"
-  if [[ -n "${found}" && -f "${found}" ]]; then printf '%s\n' "${found}"; return 0; fi
+  found="$(find /root -maxdepth 3 -type f -iname "${input}" 2>/dev/null | head -1)"
+  [[ -n "${found}" && -f "${found}" ]] && { printf '%s\n' "${found}"; return 0; }
+  found="$(find /root -maxdepth 3 -type f -iname "${input}.zip" 2>/dev/null | head -1)"
+  [[ -n "${found}" && -f "${found}" ]] && { printf '%s\n' "${found}"; return 0; }
+  found="$(find /root -maxdepth 3 -type f -iname "*${input}*.zip" 2>/dev/null | head -1)"
+  [[ -n "${found}" && -f "${found}" ]] && { printf '%s\n' "${found}"; return 0; }
   return 1
 }
 
 list_root_zips() {
-  find /root -maxdepth 2 -type f -iname '*.zip' 2>/dev/null | sort -r
+  find /root -maxdepth 3 -type f -iname '*.zip' 2>/dev/null | sort -r
 }
 
 pick_zip() {
-  echo
-  echo -e "${CYAN}How to select bot ZIP?${NC}"
-  echo -e "  ${GREEN}[1]${NC} Type filename / path"
-  echo -e "  ${GREEN}[2]${NC} Scan /root and choose from list"
-  read -r -p "Choice [1]: " mode
+  # ALL user interaction on stderr; ONLY final path on stdout
+  _ui ""
+  _ui "${CYAN}Select bot ZIP${NC}"
+  _ui "  ${GREEN}[1]${NC} Type filename / path / version (e.g. 1.3.2 or NexusNet-V1.3.2.zip)"
+  _ui "  ${GREEN}[2]${NC} Scan /root and pick from list"
+  _ui ""
+  local mode name path choice
+  read -r -p "$(echo -e "${YLW}Choice [1]: ${NC}")" mode >&2 || true
   mode="${mode//$'\r'/}"
   mode="${mode:-1}"
 
-  if [[ "${mode}" == "1" ]]; then
-    echo
-    echo "Examples:  NexusNet-V1.3.2.zip   |   /root/NexusNet-V1.3.2.zip"
-    read -r -p "Filename or path: " name
-    local path
+  # If user typed a path/version instead of 1/2, treat as mode 1 input
+  if [[ "${mode}" != "1" && "${mode}" != "2" ]]; then
+    name="${mode}"
     if path="$(resolve_zip_path "${name}")"; then
-      ok "Using: ${path}"
+      _ui "${GREEN}[+]${NC} Using: ${path}"
       printf '%s\n' "${path}"
       return 0
     fi
-    err "Not found: ${name}"
-    log "ZIPs under /root:"
-    list_root_zips | head -20 || true
-    ls -lah /root 2>/dev/null | head -25 || true
+    _ui "${RED}[-]${NC} Not found from input: ${name}"
+    mode="2"
+  fi
+
+  if [[ "${mode}" == "1" ]]; then
+    _ui "Examples: NexusNet-V1.3.2.zip | 1.3.2 | /root/NexusNet-V1.3.2.zip"
+    read -r -p "$(echo -e "${YLW}Filename / path / version: ${NC}")" name >&2 || true
+    name="${name//$'\r'/}"
+    if path="$(resolve_zip_path "${name}")"; then
+      _ui "${GREEN}[+]${NC} Using: ${path}"
+      printf '%s\n' "${path}"
+      return 0
+    fi
+    _ui "${RED}[-]${NC} Not found: ${name}"
+    _ui "${CYAN}[*]${NC} Listing /root *.zip ..."
+    list_root_zips >&2 || true
+    ls -lah /root >&2 2>/dev/null | head -30 || true
     die "File not found"
   fi
 
+  # mode 2 — list
   local zips=() f
   while IFS= read -r f; do
     [[ -n "$f" && -f "$f" ]] && zips+=("$f")
   done < <(list_root_zips)
 
   if [[ ${#zips[@]} -eq 0 ]]; then
-    warn "No .zip under /root"
-    ls -lah /root 2>/dev/null | head -30 || true
-    read -r -p "Enter full path: " name
-    local path
+    _ui "${YLW}[!]${NC} No .zip found under /root"
+    ls -lah /root >&2 2>/dev/null | head -40 || true
+    read -r -p "$(echo -e "${YLW}Full path to ZIP: ${NC}")" name >&2 || true
     path="$(resolve_zip_path "${name}")" || die "Not found: ${name}"
+    _ui "${GREEN}[+]${NC} Using: ${path}"
     printf '%s\n' "${path}"
     return 0
   fi
 
-  echo
-  echo -e "${CYAN}ZIP files:${NC}"
-  echo -e "${DIM}----------------------------------------${NC}"
-  local i=1
+  _ui ""
+  _ui "${CYAN}ZIP files found:${NC}"
+  _ui "${DIM}----------------------------------------${NC}"
+  local i=1 base sz ver
   for z in "${zips[@]}"; do
-    local base sz ver
     base="$(basename "$z")"
     sz=$(du -h "$z" 2>/dev/null | awk '{print $1}')
     ver="$(infer_version_from_name "$base")"
-    printf "  ${GREEN}[%d]${NC}  %s  ${DIM}(%s)${NC}" "$i" "$base" "${sz:-?}"
-    [[ -n "$ver" ]] && printf "  v%s" "$ver"
-    echo
-    printf "      ${DIM}%s${NC}\n" "$z"
+    _ui "  ${GREEN}[${i}]${NC}  ${base}  ${DIM}(${sz:-?})${NC}${ver:+  v${ver}}"
+    _ui "      ${DIM}${z}${NC}"
     ((i++)) || true
   done
-  echo -e "${DIM}----------------------------------------${NC}"
-  read -r -p "Select number: " choice
+  _ui "${DIM}----------------------------------------${NC}"
+  read -r -p "$(echo -e "${YLW}Select number: ${NC}")" choice >&2 || true
   choice="${choice//$'\r'/}"
-  [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 && "${choice}" -le ${#zips[@]} ]] || die "Invalid"
-  printf '%s\n' "${zips[$((choice-1))]}"
+  [[ "${choice}" =~ ^[0-9]+$ ]] && [[ "${choice}" -ge 1 && "${choice}" -le ${#zips[@]} ]] \
+    || die "Invalid number"
+  path="${zips[$((choice-1))]}"
+  _ui "${GREEN}[+]${NC} Using: ${path}"
+  printf '%s\n' "${path}"
 }
 
 extract_zip_source() {
