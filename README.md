@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/33942740/README.md)
+[README.md](https://github.com/user-attachments/files/35216069/README.md)
 <div align="center">
 
 # ⚡ NXT-BM
@@ -7,7 +7,7 @@
 
 **Install · Update · Backup · Migrate · Secure** your NexusNet Telegram bot — from one command.
 
-![version](https://img.shields.io/badge/version-1.4.1-00b4d8?style=for-the-badge)
+![version](https://img.shields.io/badge/version-1.5.0-00b4d8?style=for-the-badge)
 ![shell](https://img.shields.io/badge/bash-5%2B-4eaa25?style=for-the-badge&logo=gnubash&logoColor=white)
 ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-supported-e95420?style=for-the-badge&logo=ubuntu&logoColor=white)
 ![license](https://img.shields.io/badge/license-KeEn-blueviolet?style=for-the-badge)
@@ -22,7 +22,7 @@
 
 | | |
 |---|---|
-| 🚀 **One-command VPS migration** | Move the whole bot (code, DB, keys, service) to a new server over SSH. No manual copying. |
+| 🚀 **One-command VPS migration** | Move the bot (code, DB, keys, service) to a new server over SSH. No manual copying. |
 | 🔄 **Safe updates** | Update from a local ZIP. `.env`, database and license keys are never touched. Automatic backup + one-key rollback. |
 | 🔐 **Keys & License center** | Change token, admins, encryption key, license key — or generate a brand-new license key pair — from a menu. |
 | 💾 **Consistent backups** | SQLite hot-backup while the bot is running. Full or DB-only, auto-pruned. |
@@ -166,7 +166,7 @@ nxt-bm backup [full|db]         nxt-bm restore [archive]
 nxt-bm migrate-export | migrate-push | migrate-import <package>
 nxt-bm keys                     nxt-bm env-set KEY VALUE
 nxt-bm start | stop | restart | status | logs [n]
-nxt-bm doctor | telegram        nxt-bm update-manager
+nxt-bm doctor | telegram | repair-deps        nxt-bm update-manager
 ```
 
 ---
@@ -206,6 +206,9 @@ Backups and migration cover SQLite files. For an external DB, keep your own DB d
 
 <div align="center">
 
-Developed by **SiNa (KeEn)** · NXT-BM v1.4.1
+Developed by **SiNa (KeEn)** · NXT-BM v1.5.0
 
 </div>
+
+
+**Scope note:** This manager migrates the NexusNet bot and its data/configuration. It does not package or deploy the website source or Nginx/SSL configuration by itself.
