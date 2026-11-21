@@ -5,7 +5,7 @@
 # =============================================================================
 set -euo pipefail
 
-MANAGER_VERSION="1.4.2"
+MANAGER_VERSION="1.5.0"
 REPO="SiNaKeEn/NexusNet-Bot"
 MANAGER_BRANCH="Manager"
 CMD_NAME="nxt-bm"
@@ -808,8 +808,9 @@ ${CYAN}Migration checklist${NC}
   3. NEW server : install manager, then  ${CMD_NAME} migrate-import <package.tar.gz>
   4. Verify     : ${CMD_NAME} doctor   (token, webhook, DB integrity, conflicts)
   5. OLD server : systemctl disable --now ${SERVICE_NAME}   (never run both with one token)
-  6. Webhook mode only: point DNS (A record) to the NEW IP, set up reverse proxy + TLS there,
-     then restart the bot so it re-registers the webhook.
+  6. Website is bundled in the source code and runs inside the NexusNet service (default 127.0.0.1:8090).
+     During import, enter the domain to generate an Nginx reverse proxy; SSL is issued only after DNS points here.
+  7. Webhook mode only: point DNS (A record) to the NEW IP and ensure reverse proxy + TLS, then restart.
   7. Keep the package safe: it contains .env, encryption key and license private key.
 EOT
 }
@@ -860,6 +861,105 @@ do_export_migrate() {
     fi
   fi
   return 0
+}
+
+
+setup_storefront_proxy() {
+  local domain="${MIGRATION_DOMAIN:-}" port host_conf enabled
+  if [[ -z "${domain}" && "${ASSUME_YES}" != "1" ]]; then
+    ask "Website domain (e.g. nexus-net.online; blank to skip Nginx/SSL)" ""
+    domain="${ANS}"
+  fi
+  [[ -n "${domain}" ]] || { info "Website proxy setup skipped; source/site app is installed and listens on its configured local port."; return 0; }
+  domain="${domain#http://}"; domain="${domain#https://}"; domain="${domain%%/*}"
+  [[ "${domain}" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] \
+    || { warn "Invalid domain '${domain}'. Nginx setup skipped."; return 0; }
+
+  port="$(env_get STOREFRONT_PORT)"; port="${port:-8090}"
+  host_conf="/etc/nginx/sites-available/nexusnet-${domain}.conf"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq || warn "apt update failed while preparing Nginx"
+  apt-get install -y -qq nginx curl ca-certificates >/dev/null || { warn "Nginx installation failed"; return 0; }
+
+  if [[ -e "${host_conf}" ]]; then
+    local backup="${BACKUP_ROOT}/nginx-$(stamp)"
+    mkdir -p "${backup}"; cp -a "${host_conf}" "${backup}/"
+    warn "Existing ${host_conf} preserved in ${backup}; will not overwrite it."
+    return 0
+  fi
+  cat > "${host_conf}" <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${domain} www.${domain};
+
+    client_max_body_size 20m;
+
+    location / {
+        proxy_pass http://127.0.0.1:${port};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 120s;
+    }
+}
+NGINX
+  ln -sfn "${host_conf}" "/etc/nginx/sites-enabled/nexusnet-${domain}.conf"
+  # Disable only the stock default site; preserve all other virtual hosts.
+  if [[ -L /etc/nginx/sites-enabled/default ]]; then rm -f /etc/nginx/sites-enabled/default; fi
+  if nginx -t; then
+    systemctl enable --now nginx >/dev/null 2>&1 || true
+    systemctl reload nginx || { warn "Nginx reload failed; config retained for inspection"; return 0; }
+    ok "Nginx reverse proxy configured: ${domain} -> 127.0.0.1:${port}"
+  else
+    rm -f "/etc/nginx/sites-enabled/nexusnet-${domain}.conf"
+    warn "Nginx config test failed; generated site was disabled. Existing sites were not modified."
+    return 0
+  fi
+
+  local resolved www_resolved
+  local cert_args=()
+  resolved="$(getent ahostsv4 "${domain}" 2>/dev/null | awk 'NR==1{print $1}' || true)"
+  www_resolved="$(getent ahostsv4 "www.${domain}" 2>/dev/null | awk 'NR==1{print $1}' || true)"
+  if [[ -n "${resolved}" ]]; then
+    cert_args=(-d "${domain}")
+    [[ -n "${www_resolved}" ]] && cert_args+=(-d "www.${domain}")
+    if command -v certbot >/dev/null 2>&1 || apt-get install -y -qq certbot python3-certbot-nginx >/dev/null 2>&1; then
+      if [[ "${ASSUME_YES}" == "1" ]]; then
+        certbot --nginx "${cert_args[@]}" --non-interactive --agree-tos --register-unsafely-without-email --redirect \
+          || warn "Let's Encrypt issuance failed; HTTP remains configured. Check DNS/proxy/firewall and run certbot manually."
+      else
+        echo "DNS resolves for ${domain}. Certbot can attempt HTTPS issuance, including proxied DNS if HTTP-01 is reachable."
+        confirm "Issue/enable Let's Encrypt HTTPS for ${domain}?" \
+          && certbot --nginx "${cert_args[@]}" --redirect \
+          || warn "SSL not issued; HTTP proxy remains available."
+      fi
+    else
+      warn "Certbot installation failed; HTTP proxy remains configured."
+    fi
+  else
+    warn "DNS for ${domain} has no IPv4 answer yet. SSL was not attempted."
+    info "After configuring DNS and allowing HTTP-01 on port 80, run: certbot --nginx -d ${domain}"
+  fi
+}
+
+verify_storefront() {
+  local port tries=0
+  port="$(env_get STOREFRONT_PORT)"; port="${port:-8090}"
+  while (( tries < 10 )); do
+    if curl -fsS --max-time 3 "http://127.0.0.1:${port}/api/version" >/dev/null 2>&1 \
+      || curl -sS --max-time 3 -o /dev/null "http://127.0.0.1:${port}/"; then
+      ok "Storefront HTTP listener responds on 127.0.0.1:${port}"
+      return 0
+    fi
+    sleep 2; tries=$((tries+1))
+  done
+  warn "Storefront did not respond on 127.0.0.1:${port}. Check STOREFRONT_ENABLED, port and journal logs."
+  return 1
 }
 
 do_import_migrate() {
@@ -949,12 +1049,15 @@ do_import_migrate() {
   _bot_ver_cache=""
   service_start || die "Import completed, but service failed to start; see journalctl -u ${SERVICE_NAME}"
   sleep 3
+  verify_storefront || true
+  setup_storefront_proxy
   do_telegram_check
   [[ -f "${work}/crontab.txt" ]] && { warn "The old server had cron entries - re-create manually if needed:"; sed 's/^/   /' "${work}/crontab.txt"; }
   if [[ -n "$(env_get WEBHOOK_URL)" ]]; then
     warn "Webhook mode: point DNS of $(env_get WEBHOOK_URL) to this server's IP and set up reverse proxy + TLS."
   fi
   ok "Import finished - bot v$(get_bot_version)"
+  info "Storefront source, static assets and app code are included in the migration package."
   info "Now stop the OLD server's bot:  systemctl disable --now ${SERVICE_NAME}"
 }
 
@@ -1015,7 +1118,7 @@ do_migrate_menu() {
 }
 
 # ---------- keys & license ----------
-pem_to_env() { awk 'NF { if (n++) printf "\\n"; printf "%s", $0 }' "$1"; }
+pem_to_env() { awk 'NF { if (n++) printf "\n"; printf "%s", $0 }' "$1"; }
 
 show_env_status() {
   local k v
