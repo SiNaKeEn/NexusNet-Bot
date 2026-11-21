@@ -5,7 +5,7 @@
 # =============================================================================
 set -euo pipefail
 
-MANAGER_VERSION="1.4.1"
+MANAGER_VERSION="1.4.2"
 REPO="SiNaKeEn/NexusNet-Bot"
 MANAGER_BRANCH="Manager"
 CMD_NAME="nxt-bm"
@@ -139,10 +139,17 @@ fix_perms() {
 
 run_preflight() {
   local py="${INSTALL_DIR}/.venv/bin/python" pf="${INSTALL_DIR}/deploy/preflight.py"
-  if [[ -x "${py}" && -f "${pf}" ]]; then
+  [[ -x "${py}" ]] || { err "Virtualenv Python missing: ${py}"; return 1; }
+  log "Checking SQLAlchemy asyncio dependencies..."
+  "${py}" -c 'import greenlet; from sqlalchemy.ext.asyncio import AsyncSession; print("async dependencies OK")' \
+    || { err "Async SQLAlchemy dependencies missing. Run: ${CMD_NAME} repair-deps"; return 1; }
+  if [[ -f "${pf}" ]]; then
     log "Preflight..."
-    ( cd "${INSTALL_DIR}" && "${py}" "${pf}" ) || { warn "Preflight reported problems"; return 1; }
+    ( cd "${INSTALL_DIR}" && "${py}" "${pf}" ) || { err "Preflight failed; refusing to start/update service"; return 1; }
     ok "Preflight OK"
+  else
+    err "deploy/preflight.py missing; refusing to treat this deployment as verified"
+    return 1
   fi
   return 0
 }
@@ -429,10 +436,17 @@ is_preserved() {
   return 1
 }
 clean_code_dir() {
-  local d="$1" p
+  # Never silently destroy unknown files (e.g. site assets or custom config).
+  # Move deploy candidates to a timestamped safety snapshot before overlaying new code.
+  local d="$1" p n snapshot="${BACKUP_ROOT}/predeploy-preserved-$(stamp)"
+  mkdir -p "${BACKUP_ROOT}"; chmod 700 "${BACKUP_ROOT}"
   while IFS= read -r -d '' p; do
-    is_preserved "$(basename "${p}")" || rm -rf "${p}"
+    n="$(basename "${p}")"
+    is_preserved "${n}" && continue
+    mkdir -p "${snapshot}"
+    mv -- "${p}" "${snapshot}/" || { err "Could not safely move ${p}; aborting deploy"; return 1; }
   done < <(find "${d}" -mindepth 1 -maxdepth 1 -print0)
+  [[ -d "${snapshot}" ]] && info "Previous non-preserved files saved in ${snapshot}"
   return 0
 }
 copy_code_in() {  # overlay source dir into INSTALL_DIR without touching secrets / live DB
@@ -492,9 +506,27 @@ setup_venv() {
     log "Installing Python requirements..."
     "${INSTALL_DIR}/.venv/bin/pip" install -r "${req}" -q --disable-pip-version-check \
       || { err "pip install failed"; return 1; }
+  else
+    warn "No requirements.txt found; dependency installation cannot be verified"
   fi
+  # SQLAlchemy asyncio needs greenlet; requirements files sometimes omit this extra.
+  log "Ensuring greenlet for SQLAlchemy asyncio..."
+  "${INSTALL_DIR}/.venv/bin/pip" install greenlet -q --disable-pip-version-check \
+    || { err "greenlet installation failed"; return 1; }
+  "${INSTALL_DIR}/.venv/bin/python" -c 'import greenlet; from sqlalchemy.ext.asyncio import AsyncSession' \
+    || { err "Async SQLAlchemy import check failed"; return 1; }
   return 0
 }
+repair_dependencies() {
+  [[ -x "${INSTALL_DIR}/.venv/bin/python" ]] || die "Virtualenv not found. Run install/migration first."
+  log "Installing greenlet into NexusNet virtualenv..."
+  "${INSTALL_DIR}/.venv/bin/pip" install greenlet -q --disable-pip-version-check || die "greenlet install failed"
+  "${INSTALL_DIR}/.venv/bin/python" -c 'import greenlet; from sqlalchemy.ext.asyncio import AsyncSession; print("greenlet + SQLAlchemy asyncio OK")' \
+    || die "Dependency verification failed"
+  ok "Async dependencies repaired"
+}
+
+
 install_unit() {  # [fallback_unit_file] [old_install_dir]
   local fallback="${1:-}" old_dir="${2:-/opt/nexusnet}" unit="/etc/systemd/system/${SERVICE_NAME}.service" s=""
   if   [[ -f "${INSTALL_DIR}/deploy/systemd.service" ]]; then s="${INSTALL_DIR}/deploy/systemd.service"
@@ -654,6 +686,7 @@ do_install_bot() {
   install_unit || true
   fix_perms
   first_run_wizard
+  run_preflight || die "Preflight failed; installation is not ready to start"
   ok "Install complete - v$(get_bot_version)"
   if has_service && confirm "Start the bot now?"; then service_start || true; fi
 }
@@ -692,7 +725,11 @@ do_update_bot() {
     return 1
   fi
   fix_perms; check_new_env_vars
-  run_preflight || warn "Preflight failed"
+  if ! run_preflight; then
+    err "Preflight failed; service will not be started"
+    confirm "Rollback to ${current}?" && do_rollback "${rb}"
+    return 1
+  fi
   if service_start; then ok "Update OK: ${current} -> $(get_bot_version)"
   else err "Start failed"; confirm "Rollback to ${current}?" && do_rollback "${rb}"; fi
 }
@@ -719,7 +756,9 @@ do_rollback() {
     tar -xzf "${rb_dir}/code.tar.gz" -C "${INSTALL_DIR}"
   fi
   [[ -f "${rb_dir}/.env" ]] && cp -a "${rb_dir}/.env" "${INSTALL_DIR}/.env"
-  _bot_ver_cache=""; setup_venv || warn "venv/requirements problem"; fix_perms; service_start || true
+  _bot_ver_cache=""; setup_venv || die "Rollback dependency installation failed"
+  fix_perms; run_preflight || die "Rollback preflight failed; service left stopped"
+  service_start || die "Rollback restored, but service failed to start"
   ok "Rollback done - v$(get_bot_version)"
 }
 
@@ -905,9 +944,10 @@ do_import_migrate() {
       else err "SQLite integrity check FAILED for ${dbf}"; fi
     else warn "Database file not found: ${dbf} (new empty DB will be created on start)"; fi
   fi
-  check_new_env_vars; run_preflight || warn "Preflight reported problems"
+  check_new_env_vars
+  run_preflight || die "Preflight failed; refusing to start. Fix issues, then rerun migrate-import."
   _bot_ver_cache=""
-  service_start || true
+  service_start || die "Import completed, but service failed to start; see journalctl -u ${SERVICE_NAME}"
   sleep 3
   do_telegram_check
   [[ -f "${work}/crontab.txt" ]] && { warn "The old server had cron entries - re-create manually if needed:"; sed 's/^/   /' "${work}/crontab.txt"; }
@@ -1290,7 +1330,7 @@ Usage: ${CMD_NAME} [command]
   keys                    keys & license menu
   env-set KEY VALUE       set a variable in .env
   start | stop | restart | status | logs [n] | doctor | telegram
-  install-manager | update-manager
+  install-manager | update-manager | repair-deps
 EOT
 }
 
@@ -1312,6 +1352,7 @@ main() {
     uninstall-bot)    do_uninstall_bot ;;
     migrate)          do_migrate_menu ;;
     update-manager)   do_update_manager ;;
+    repair-deps)      repair_dependencies ;;
     install)          do_install_bot ;;
     update)           do_update_bot ;;
     rollback)         do_rollback "${1:-}" ;;
