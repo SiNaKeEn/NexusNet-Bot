@@ -1,4 +1,4 @@
-[README.fa.md](https://github.com/user-attachments/files/33942747/README.fa.md)
+[README.fa.md](https://github.com/user-attachments/files/35216071/README.fa.md)
 <div align="center">
 
 # ⚡ NXT-BM
@@ -7,7 +7,7 @@
 
 **نصب · آپدیت · بکاپ · انتقال · امنیت** — همه با یک دستور.
 
-![version](https://img.shields.io/badge/version-1.4.1-00b4d8?style=for-the-badge)
+![version](https://img.shields.io/badge/version-1.5.0-00b4d8?style=for-the-badge)
 ![shell](https://img.shields.io/badge/bash-5%2B-4eaa25?style=for-the-badge&logo=gnubash&logoColor=white)
 ![os](https://img.shields.io/badge/Ubuntu%20%7C%20Debian-supported-e95420?style=for-the-badge&logo=ubuntu&logoColor=white)
 
@@ -21,10 +21,13 @@
 
 ## ✨ قابلیت‌ها
 
-- 🚀 **انتقال کامل به VPS جدید با یک دستور** — کد، دیتابیس، کلیدها و سرویس از طریق SSH منتقل می‌شوند.
+- 🚀 **انتقال کامل NexusNet به VPS جدید** — سورس بات و وب‌سایت (Frontend/Backend و فایل‌های static)، دیتابیس، کلیدها و تنظیمات از طریق SSH منتقل می‌شوند. هنگام Import امکان ساخت خودکار Nginx reverse proxy و صدور SSL پس از آماده بودن DNS وجود دارد.
 - 🔄 **آپدیت امن** — از روی ZIP محلی؛ `.env`، دیتابیس و کلیدهای لایسنس هرگز دست نمی‌خورند. بکاپ خودکار + برگشت (Rollback).
 - 🔐 **مرکز کلید و لایسنس** — تغییر توکن، ادمین‌ها، کلید رمزنگاری، لایسنس یا ساخت جفت‌کلید جدید از داخل منو.
 - 💾 **بکاپ سازگار** — بکاپ SQLite در حین اجرای ربات.
+- 🧩 **رفع وابستگی Async** — نصب و تست `greenlet` برای SQLAlchemy asyncio، حتی اگر از requirements جا افتاده باشد.
+- 🛑 **Preflight اجباری** — در نصب، آپدیت و مهاجرت، اگر تست‌های حیاتی شکست بخورند سرویس اجرا نمی‌شود.
+- 🛡️ **حفاظت فایل‌ها** — فایل‌های ناشناخته هنگام Deploy به Snapshot زمان‌دار منتقل می‌شوند و بی‌صدا حذف نمی‌شوند.
 - 🩺 **عیب‌یابی** — بررسی `.env`، کلید Fernet، سلامت دیتابیس، توکن تلگرام، وبهوک و تداخل توکن.
 
 ## 📦 نصب
@@ -76,7 +79,7 @@ nxt-bm doctor
 **داخل پکیج:** `.env`، دیتابیس، پوشه `data`، فایل‌های `license_*.pem`، یک نسخه از کد ربات (روی سرور جدید ZIP لازم نیست)، سرویس systemd و کرون‌ها. بعد از ایمپورت، چک‌سام، سلامت دیتابیس، توکن تلگرام، وبهوک و تداخل بررسی می‌شود.
 
 > ⚠️ **ربات را هرگز با یک توکن روی دو سرور همزمان اجرا نکن.** بعد از انتقال، سرویس سرور قدیمی غیرفعال می‌شود.
-> در حالت وبهوک، DNS را به آی‌پی جدید بده و reverse proxy و TLS را روی سرور جدید بساز.
+> سایت داخل همان سرویس NexusNet و به‌صورت پیش‌فرض روی `127.0.0.1:8090` اجرا می‌شود. هنگام Import دامنه را وارد کن تا Nginx ساخته شود؛ صدور SSL فقط وقتی DNS به IP جدید اشاره کند انجام می‌شود. اگر Nginx از قبل برای دامنه کانفیگ داشته باشد، Manager آن را بازنویسی نمی‌کند.
 > پکیج شامل اطلاعات حساس است؛ بعد از استفاده پاکش کن.
 
 ## 🔐 کلید و لایسنس
@@ -118,7 +121,7 @@ nxt-bm backup [full|db]         nxt-bm restore [archive]
 nxt-bm migrate-export | migrate-push | migrate-import <package>
 nxt-bm keys                     nxt-bm env-set KEY VALUE
 nxt-bm start | stop | restart | status | logs [n]
-nxt-bm doctor | telegram        nxt-bm update-manager
+nxt-bm doctor | telegram | repair-deps        nxt-bm update-manager
 ```
 
 <div dir="rtl">
@@ -138,6 +141,6 @@ nxt-bm doctor | telegram        nxt-bm update-manager
 
 <div align="center">
 
-Developed by **SiNa (KeEn)** · NXT-BM v1.4.1
+Developed by **SiNa (KeEn)** · NXT-BM v1.5.0
 
 </div>
